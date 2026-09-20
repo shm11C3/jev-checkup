@@ -2,6 +2,7 @@ export type Json = null | boolean | number | string | Json[] | { [key: string]: 
 export interface Question { type: "noul" | "score" | "choice"; instructions: Json; criteria?: Json }
 export type Questions = Record<string, Question>;
 export type Answers = Record<string, Record<string, unknown>>;
+export type AspectId = "test-honesty" | "naming-honesty";
 export type ContextMode = "focus" | "focusprod";
 export type Outcome = "finding" | "clean" | "cannot_tell" | "not_judged" | "unjudgeable" | "unevaluated";
 export type Band = "0..0.05" | "0.05..0.15" | "0.15..0.30" | ">=0.30";
@@ -9,7 +10,7 @@ export interface Location { file: string; startLine: number; endLine: number }
 export interface EvidenceSource { file: string; hash: string }
 export interface Thresholds { strong: number; unseen: number; midLow: number; midHigh: number; confidence: number; finding: number; control: number }
 export interface AspectDefinition {
-  id: "test-honesty";
+  id: AspectId;
   propositionVersion: string;
   model: string;
   selector: string;
@@ -22,6 +23,7 @@ export interface AspectDefinition {
   questions: Questions;
 }
 export interface Config {
+  aspects?: AspectId[];
   model: string;
   include: string[];
   exclude: string[];
@@ -34,7 +36,7 @@ export interface Config {
 }
 export interface PreparedTarget {
   fingerprint: string;
-  aspect: "test-honesty";
+  aspect: AspectId;
   location: Location;
   target: { path: string[]; name: string };
   contextMode: ContextMode;
@@ -133,6 +135,7 @@ export interface RunAspect {
   id: string;
   condition: string;
   definition: AspectDefinition;
+  selectionFiles?: ScopeFile[];
   calibration: { validation: "provisional"; byContextMode: Record<ContextMode, ModeCalibration> };
   evaluated: number;
   cannotTell: number;

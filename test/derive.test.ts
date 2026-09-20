@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
-import { deriveRun, judge } from "../src/derive/index.js";
+import { getNamingAspectDefinition } from "../src/aspects/index.js";
+import { deriveRun, judge, mergeAspectRuns } from "../src/derive/index.js";
 import { hash, subjectRevision } from "../src/shared/hash.js";
 import type {
   Answers,
@@ -140,6 +141,90 @@ function input(overrides: Partial<DeriveInput> = {}): DeriveInput {
     metadata: { id: "run-1", at: "2026-09-20T00:00:00.000Z", commit: null, dirty: false, complete: true },
     top: 10,
     ...overrides,
+  };
+}
+
+function namingTarget(
+  definition: AspectDefinition,
+  fingerprint: string,
+): PreparedTarget {
+  const state = {
+    file_path: "src/example.test.ts",
+    source: "L1| function formatBytes() { return 1; }",
+    target_symbol: {
+      kind: "function",
+      qualified_name: "function:formatBytes",
+      name: "formatBytes",
+      declaration: "function formatBytes() { return 1; }",
+    },
+  } as const;
+  const symbolKey = "n0001";
+  const questions = Object.fromEntries(Object.entries(definition.questions).map(([id, value]) => [
+    id.replace("{symbol_key}", symbolKey),
+    value,
+  ]));
+  const evidenceSources = [{ file: "src/example.test.ts", hash: "file-hash" }];
+  return {
+    fingerprint,
+    aspect: "naming-honesty",
+    location: { file: "src/example.test.ts", startLine: 1, endLine: 1 },
+    target: { path: [], name: "formatBytes" },
+    contextMode: "focus",
+    inputHash: hash(state),
+    subjectRevision: subjectRevision(definition.propositionVersion, evidenceSources),
+    evidenceSources,
+    state,
+    questions,
+    controls: { own: "not_available", sibling: "not_available" },
+  };
+}
+
+function namingAnswers(mismatch = 0.8, sideEffect = 0.1, context = 0.9): Answers {
+  return {
+    "n0001__behavior_mismatch": { type: "noul", noul: mismatch },
+    "n0001__hidden_side_effect": { type: "noul", noul: sideEffect },
+    "n0001__context_sufficient": { type: "noul", noul: context },
+  };
+}
+
+function namingSelection(targets: PreparedTarget[]): Selection {
+  return selection(targets);
+}
+
+function namingInput(overrides: Partial<DeriveInput> = {}): DeriveInput {
+  const naming = getNamingAspectDefinition({
+    model: "jev-1.13.0",
+    include: ["**/*.ts"],
+    exclude: [],
+    concurrency: 1,
+    requestsPerMinute: 1,
+    tokensPerSecond: 1,
+    top: 10,
+    thresholds: {},
+  });
+  const prepared = namingTarget(naming, "naming");
+  return {
+    selection: namingSelection([prepared]),
+    definition: naming,
+    observations: [{ fingerprint: "naming", answers: namingAnswers() }],
+    usage: { requests: 1, inputTokens: 10, cacheHits: 0 },
+    labels: [],
+    history: [],
+    metadata: { id: "run-1", at: "2026-09-20T00:00:00.000Z", commit: null, dirty: false, complete: true },
+    top: 10,
+    ...overrides,
+  };
+}
+
+function labelForTarget(prepared: PreparedTarget, propositionVersion: string): Label {
+  return {
+    fingerprint: prepared.fingerprint,
+    propositionVersion,
+    subjectRevision: prepared.subjectRevision,
+    evidenceSources: prepared.evidenceSources,
+    validity: "valid",
+    priority: "high",
+    source: "human",
   };
 }
 
@@ -422,4 +507,88 @@ test("an inconclusive prior run prevents target_gone resolution", () => {
   }));
   assert.equal(gone.resolved.length, 0);
   assert.equal(gone.pendingComparisons[0]?.reason, "prior_run_not_conclusive");
+});
+
+test("merged aspects keep calibration totals and usage independent", () => {
+  const naming = getNamingAspectDefinition({
+    model: "jev-1.13.0",
+    include: ["**/*.ts"],
+    exclude: [],
+    concurrency: 1,
+    requestsPerMinute: 1,
+    tokensPerSecond: 1,
+    top: 10,
+    thresholds: {},
+  });
+  const testPrepared = target("test-finding");
+  const namingPrepared = namingTarget(naming, "naming-finding");
+  const testRun = deriveRun(input({
+    selection: selection([testPrepared]),
+    observations: [{ fingerprint: testPrepared.fingerprint, answers: answers("t0001", { outcome_unasserted: noul(0.8) }) }],
+    labels: [labelForTarget(testPrepared, definition.propositionVersion)],
+  }));
+  const namingRun = deriveRun(namingInput({
+    selection: namingSelection([namingPrepared]),
+    observations: [{ fingerprint: namingPrepared.fingerprint, answers: namingAnswers(0.8) }],
+    labels: [labelForTarget(namingPrepared, naming.propositionVersion)],
+  }));
+  const merged = mergeAspectRuns([testRun, namingRun]);
+  assert.deepEqual(merged.aspects.map(aspect => aspect.id), ["test-honesty", "naming-honesty"]);
+  assert.equal(merged.total.score, 0);
+  assert.equal(merged.total.aspects, 2);
+  assert.deepEqual(merged.total.weights, { "test-honesty": 0.5, "naming-honesty": 0.5 });
+  assert.equal(merged.usage.requests, 2);
+  assert.equal(merged.usage.inputTokens, 20);
+  assert.deepEqual(merged.topFindings["test-honesty"], ["test-finding"]);
+  assert.deepEqual(merged.topFindings["naming-honesty"], ["naming-finding"]);
+});
+
+test("combined history filters aspects and preserves aspect-local diagnostics", () => {
+  const naming = getNamingAspectDefinition({
+    model: "jev-1.13.0",
+    include: ["**/*.ts"],
+    exclude: [],
+    concurrency: 1,
+    requestsPerMinute: 1,
+    tokensPerSecond: 1,
+    top: 10,
+    thresholds: {},
+  });
+  const testPrepared = target("shared");
+  const firstTest = deriveRun(input({
+    metadata: { id: "run-1", at: "2026-09-19T00:00:00.000Z", commit: null, dirty: false, complete: true },
+    selection: selection([testPrepared]),
+    observations: [{ fingerprint: "shared", answers: answers("t0001", { outcome_unasserted: noul(0.8) }) }],
+  }));
+  const diagnosticSelection = namingSelection([]);
+  diagnosticSelection.scope.files[0] = {
+    file: "src/example.test.ts",
+    status: "parsed",
+    hash: "file-hash",
+    reason: "naming limitation: anonymous function omitted",
+  };
+  const firstNaming = deriveRun(namingInput({
+    metadata: { id: "run-1", at: "2026-09-19T00:00:00.000Z", commit: null, dirty: false, complete: true },
+    selection: diagnosticSelection,
+    observations: [],
+  }));
+  const baseline = mergeAspectRuns([firstTest, firstNaming]);
+
+  const removedTest = deriveRun(input({
+    metadata: { id: "run-2", at: "2026-09-20T00:00:00.000Z", commit: null, dirty: false, complete: true },
+    selection: selection([]),
+    observations: [],
+    history: [baseline],
+  }));
+  assert.deepEqual(removedTest.resolved, [{ fingerprint: "shared", baselineRun: "run-1", reason: "target_gone" }]);
+
+  const currentNamingTarget = namingTarget(naming, "shared");
+  const currentNaming = deriveRun(namingInput({
+    metadata: { id: "run-2", at: "2026-09-20T00:00:00.000Z", commit: null, dirty: false, complete: true },
+    selection: namingSelection([currentNamingTarget]),
+    observations: [{ fingerprint: "shared", answers: namingAnswers(0.1, 0.1) }],
+    history: [baseline],
+  }));
+  assert.equal(currentNaming.targets[0]!.outcome, "clean");
+  assert.deepEqual(currentNaming.resolved, []);
 });

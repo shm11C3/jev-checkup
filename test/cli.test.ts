@@ -197,3 +197,34 @@ it('preserves the link', () => { expect(link).toBeDefined(); });
   assert.match(io.out, /parse_diagnostic/);
   assert.equal(run.total.score, null);
 });
+
+test("combined aspects share observation limits and remain independent in saved results", async t => {
+  const cwd = await repository(t);
+  await writeFile(join(cwd, ".jev-checkup.yml"), "aspects: [test-honesty, naming-honesty]\n");
+  let calls = 0;
+  const client: JudgeClient = { async systemOne(request) {
+    calls++;
+    const naming = Object.keys(request.questions).some(key => key.endsWith("__behavior_mismatch"));
+    const observed = naming
+      ? Object.fromEntries(Object.keys(request.questions).map(key => [key, {
+        type: "noul",
+        noul: key.endsWith("__context_sufficient") ? 1 : key.endsWith("__behavior_mismatch") ? 0.9 : 0,
+      }]))
+      : answers(request.questions, true);
+    return { model: request.model, answers: observed, usage: { input_tokens: 100 } };
+  } };
+  const io = output();
+  assert.equal(await runCli(["scan", "--history", ".jev-checkup/history"], { cwd, apiKey: null, client, ...io }), 0, io.err);
+  const run = await readRun(join(cwd, ".jev-checkup/run.json"));
+  assert.deepEqual(run.aspects.map(a => a.id).sort(), ["naming-honesty", "test-honesty"]);
+  assert.ok(run.findings.some(f => f.aspect === "naming-honesty"));
+  assert.ok(run.findings.some(f => f.aspect === "test-honesty"));
+  assert.equal(run.usage.requests, calls);
+  assert.equal(run.usage.inputTokens, calls * 100);
+  assert.equal(run.total.score, null);
+  assert.equal(await runCli(["scan", "--history", ".jev-checkup/history"], { cwd, apiKey: null, ...output() }), 0);
+  const reused = await readRun(join(cwd, ".jev-checkup/run.json"));
+  assert.equal(reused.usage.requests, 0);
+  assert.equal(reused.resolved.length, 0);
+  assert.ok(reused.findings.every(f => f.status === "persisting"));
+});

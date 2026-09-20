@@ -150,3 +150,14 @@ test("validateRun rejects malformed optional persisted metadata", () => {
     assert.throws(() => validateRun(run), /Invalid snapshot/);
   }
 });
+
+test('aspect-specific selection manifests reject malformed persisted entries', () => {
+  const valid = fixture();
+  valid.aspects[0]!.selectionFiles = [{file:'src/example.ts',status:'parsed',reason:'naming limitation'}];
+  assert.doesNotThrow(()=>validateRun(valid));
+  for (const files of [{}, [null], [{file:'../outside',status:'parsed'}], [{file:'x.ts',status:'unknown'}]]) {
+    const run=fixture();
+    (run.aspects[0] as unknown as Record<string,unknown>).selectionFiles=files;
+    assert.throws(()=>validateRun(run),/Invalid aspect selection/);
+  }
+});

@@ -1,6 +1,70 @@
 import type { Questions } from "../types.js";
 
 /**
+ * Fixed provisional questions for named declarations. The selector expands
+ * `{symbol_key}` to the prepared target's stable symbol key.
+ */
+export const namingQuestionsTemplate: Questions = {
+  "{symbol_key}__behavior_mismatch": {
+    type: "noul",
+    instructions: {
+      target_symbol: {
+        name: "{name}",
+        qualified_name: "{qualified_name}",
+        kind: "{kind}",
+        declaration: "{declaration}",
+      },
+      question:
+        "Does the declaration named by `target_symbol` behave differently from what its name and documentation lead a caller to expect?",
+      criteria: {
+        true:
+          "The declaration's observable behavior contradicts a clear promise in its name or adjacent documentation, including a misleading return, mutation, error or control-flow behavior.",
+        false:
+          "The declaration's observable behavior matches the promise conveyed by its name and adjacent documentation.",
+      },
+    },
+  },
+  "{symbol_key}__hidden_side_effect": {
+    type: "noul",
+    instructions: {
+      target_symbol: {
+        name: "{name}",
+        qualified_name: "{qualified_name}",
+        kind: "{kind}",
+        declaration: "{declaration}",
+      },
+      question:
+        "Does the declaration named by `target_symbol` perform a material side effect that its name and documentation do not disclose?",
+      criteria: {
+        true:
+          "Calling the declaration changes external state, performs I/O, mutates an input or otherwise creates a material effect that a reasonable caller would not infer from its name and adjacent documentation.",
+        false:
+          "Any material side effect is either absent or clearly disclosed by the declaration's name and adjacent documentation.",
+      },
+    },
+  },
+  "{symbol_key}__context_sufficient": {
+    type: "noul",
+    instructions: {
+      target_symbol: {
+        name: "{name}",
+        qualified_name: "{qualified_name}",
+        kind: "{kind}",
+        declaration: "{declaration}",
+      },
+      question:
+        "Is the declaration and its adjacent documentation sufficiently visible in `source` to determine whether the named behavior matches its promise and discloses material side effects?",
+      criteria: {
+        true:
+          "The declaration body and the relevant adjacent documentation are visible enough to decide whether its behavior matches its promise and whether it has a hidden side effect.",
+        false:
+          "The declaration body, documentation or required context is missing or truncated, so either judgment would depend on unseen code.",
+      },
+    },
+  },
+};
+
+/**
  * The production question template.  Keep the wording in sync with the
  * clean-room draft; placeholders are expanded once per prepared target.
  */

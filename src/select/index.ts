@@ -86,6 +86,19 @@ interface DescribeRecord {
   reported: boolean;
 }
 
+type NamingSymbolKind = "function" | "method";
+
+interface NamingRecord {
+  node: Ast;
+  declaration: Ast;
+  range: RangeInfo;
+  kind: NamingSymbolKind;
+  name: string;
+  qualifiedName: string;
+  path: string[];
+  contextStart: number;
+}
+
 interface ParsedFile {
   relativePath: string;
   rawSource: string;
@@ -246,6 +259,207 @@ function callbackBody(callback: Ast): Ast | null {
 function isFunctionNode(node: Ast | null | undefined): node is Ast {
   if (!node) return false;
   return node.kind() === "arrow_function" || node.kind() === "function_expression";
+}
+
+function parentNode(node: Ast): Ast | null {
+  return (node.parent?.() as Ast | null | undefined) ?? null;
+}
+
+function namingLiteralName(node: Ast | null): string | null {
+  if (!node) return null;
+  if (node.kind() === "identifier" || node.kind() === "property_identifier" || node.kind() === "type_identifier") {
+    return node.text();
+  }
+  if (node.kind() === "string") return parseLiteral(node);
+  if (node.kind() === "number") return node.text();
+  return null;
+}
+
+function declarationForVariable(node: Ast): Ast {
+  const declaration = parentNode(node);
+  if (!declaration || (declaration.kind() !== "lexical_declaration" && declaration.kind() !== "variable_declaration")) {
+    return node;
+  }
+  const exported = parentNode(declaration);
+  return exported?.kind() === "export_statement" ? exported : declaration;
+}
+
+function declarationName(node: Ast): string | null {
+  return namingLiteralName(field(node, "name"));
+}
+
+function documentationStart(source: string, declarationStart: number): number {
+  let start = declarationStart;
+  for (;;) {
+    const prefix = source.slice(0, start);
+    const lineComment = prefix.match(/(?:^|\n)[ \t]*\/\/[^\n]*(?:\n[ \t]*\/\/[^\n]*)*[ \t]*(?:\n[ \t]*)?$/);
+    let blockStart: number | null = null;
+    const blockEnd = prefix.lastIndexOf("*/");
+    if (blockEnd >= 0 && /^(?:[ \t]*\n)?[ \t]*$/.test(prefix.slice(blockEnd + 2))) {
+      for (let candidate = prefix.lastIndexOf("/**", blockEnd); candidate >= 0; candidate = candidate > 0 ? prefix.lastIndexOf("/**", candidate - 1) : -1) {
+        if (prefix.indexOf("*/", candidate + 3) !== blockEnd) continue;
+        const lineStart = prefix.lastIndexOf("\n", candidate - 1) + 1;
+        if (/^[ \t]*$/.test(prefix.slice(lineStart, candidate))) {
+          blockStart = lineStart;
+          break;
+        }
+      }
+    }
+    const lineStart = lineComment ? (lineComment.index! > 0 && prefix[lineComment.index!] === "\n" ? lineComment.index! + 1 : lineComment.index!) : null;
+    if (lineStart === null && blockStart === null) return start;
+    start = Math.max(lineStart ?? -1, blockStart ?? -1);
+  }
+}
+
+function namingOwners(node: Ast): string[] {
+  const ancestors = [...node.ancestors()].reverse();
+  const owners: string[] = [];
+  for (const ancestor of ancestors) {
+    if (ancestor.kind() === "class_declaration" || ancestor.kind() === "class") {
+      const name = namingLiteralName(field(ancestor, "name"));
+      if (name) owners.push(name);
+      continue;
+    }
+    if (ancestor.kind() === "method_definition") {
+      const name = namingLiteralName(field(ancestor, "name"));
+      if (name) owners.push(name);
+      continue;
+    }
+    if (ancestor.kind() === "pair") {
+      const name = namingLiteralName(field(ancestor, "key"));
+      if (name) owners.push(name);
+      continue;
+    }
+    if (ancestor.kind() === "function_declaration" || ancestor.kind() === "function_expression") {
+      const name = declarationName(ancestor);
+      if (name) owners.push(name);
+      continue;
+    }
+    if (ancestor.kind() === "variable_declarator") {
+      const value = field(ancestor, "value");
+      if (value?.id() === node.id()) continue;
+      if (value?.kind() === "class") {
+        const className = namingLiteralName(field(value, "name")) ?? namingLiteralName(field(ancestor, "name"));
+        if (className && owners.at(-1) !== className) owners.push(className);
+        continue;
+      }
+      const name = namingLiteralName(field(ancestor, "name"));
+      if (name) owners.push(name);
+    }
+  }
+  return owners;
+}
+
+function namingQualifiedName(kind: NamingSymbolKind, name: string, owners: string[]): string {
+  const qualified = [...owners, name].join(".");
+  return kind === "function" ? `function:${qualified}` : qualified;
+}
+
+function namingRecord(
+  node: Ast,
+  declaration: Ast,
+  kind: NamingSymbolKind,
+  name: string,
+  source: string,
+): NamingRecord {
+  const owners = namingOwners(node);
+  return {
+    node,
+    declaration,
+    range: rangeOf(declaration, source),
+    kind,
+    name,
+    qualifiedName: namingQualifiedName(kind, name, owners),
+    path: owners,
+    contextStart: documentationStart(source, rangeOf(declaration, source).start),
+  };
+}
+
+function namingMethodIsUnsupported(node: Ast, name: string | null): string | null {
+  const nameNode = field(node, "name");
+  if (!nameNode || !name || nameNode.kind() === "computed_property_name" || nameNode.kind() === "private_property_identifier") {
+    return "computed or dynamic method name";
+  }
+  const parent = node.ancestors().find((ancestor) => ancestor.kind() === "class_body");
+  if (name === "constructor" && parent) return "constructor";
+  if (node.children().some((child) => child.kind() === "get" || child.kind() === "set")) return "accessor";
+  return null;
+}
+
+function namingDeclarations(
+  ast: Ast,
+  source: string,
+  parseErrors: RangeInfo[],
+  diagnostics: string[],
+): NamingRecord[] {
+  const records: NamingRecord[] = [];
+  const selectedNodes = new Set<number>();
+  const omittedNodes = new Set<number>();
+  const addRecord = (record: NamingRecord): void => {
+    if (hasOverlappingParseError(record.range, parseErrors)) {
+      diagnostics.push(`parse_diagnostic overlaps naming declaration at line ${record.range.startLine}`);
+      omittedNodes.add(record.node.id());
+      return;
+    }
+    records.push(record);
+    selectedNodes.add(record.node.id());
+  };
+
+  for (const node of ast.findAll({ rule: { kind: "function_declaration" } } as never) as Ast[]) {
+    const body = field(node, "body");
+    const name = declarationName(node);
+    if (!body || !name) {
+      diagnostics.push(`naming limitation: function signature without implementation at line ${rangeOf(node, source).startLine}`);
+      omittedNodes.add(node.id());
+      continue;
+    }
+    const declaration = parentNode(node)?.kind() === "export_statement" ? parentNode(node)! : node;
+    addRecord(namingRecord(node, declaration, "function", name, source));
+  }
+
+  for (const node of ast.findAll({ rule: { kind: "variable_declarator" } } as never) as Ast[]) {
+    const value = field(node, "value");
+    if (!value || !isFunctionNode(value)) continue;
+    const name = namingLiteralName(field(node, "name"));
+    if (!name || !field(node, "name") || field(node, "name")!.kind() !== "identifier") {
+      diagnostics.push(`naming limitation: identifier-bound function requires a simple name at line ${rangeOf(node, source).startLine}`);
+      omittedNodes.add(value.id());
+      continue;
+    }
+    if (!field(value, "body")) {
+      diagnostics.push(`naming limitation: function signature without implementation at line ${rangeOf(node, source).startLine}`);
+      omittedNodes.add(value.id());
+      continue;
+    }
+    addRecord(namingRecord(value, declarationForVariable(node), "function", name, source));
+  }
+
+  for (const node of ast.findAll({ rule: { kind: "method_definition" } } as never) as Ast[]) {
+    const body = field(node, "body");
+    const name = namingLiteralName(field(node, "name"));
+    const unsupported = namingMethodIsUnsupported(node, name);
+    if (!body || unsupported) {
+      diagnostics.push(`naming limitation: ${unsupported ?? "method signature without implementation"} at line ${rangeOf(node, source).startLine}`);
+      omittedNodes.add(node.id());
+      continue;
+    }
+    if (!name) continue;
+    addRecord(namingRecord(node, node, "method", name, source));
+  }
+
+  for (const kind of ["function_signature", "method_signature", "abstract_method_signature"] as const) {
+    for (const node of ast.findAll({ rule: { kind } } as never) as Ast[]) {
+      diagnostics.push(`naming limitation: signature without implementation at line ${rangeOf(node, source).startLine}`);
+    }
+  }
+
+  for (const kind of ["arrow_function", "function_expression"] as const) {
+    for (const node of ast.findAll({ rule: { kind } } as never) as Ast[]) {
+      if (selectedNodes.has(node.id()) || omittedNodes.has(node.id())) continue;
+      diagnostics.push(`naming limitation: anonymous function or callback omitted at line ${rangeOf(node, source).startLine}`);
+    }
+  }
+  return records.sort((left, right) => left.range.start - right.range.start || left.range.end - right.range.end);
 }
 
 function directArguments(node: Ast): Ast[] {
@@ -600,6 +814,132 @@ function targetState(
         code: extractLines(folded, record.range.startLine, record.range.endLine),
       },
     },
+  };
+}
+
+function numberLinesFrom(source: string, startLine: number, prefix = "L"): string {
+  return source.split("\n").map((line, index) => `${lineId(startLine + index, prefix)}| ${line}`).join("\n");
+}
+
+function lineNumberAt(source: string, index: number): number {
+  return source.slice(0, index).split("\n").length;
+}
+
+function namingState(relativePath: string, record: NamingRecord, source: string): Json {
+  const context = source.slice(record.contextStart, record.range.end);
+  return {
+    file_path: relativePath,
+    source: numberLinesFrom(context, lineNumberAt(source, record.contextStart)),
+    target_symbol: {
+      kind: record.kind,
+      qualified_name: record.qualifiedName,
+      name: record.name,
+      declaration: record.declaration.text(),
+    },
+  };
+}
+
+function namingQuestions(definition: AspectDefinition, record: NamingRecord, symbolKey: string): Questions {
+  return replacePlaceholders(definition.questions, {
+    "{symbol_key}": symbolKey,
+    "{qualified_name}": record.qualifiedName,
+    "{name}": record.name,
+    "{kind}": record.kind,
+    "{declaration}": record.declaration.text(),
+    "{start_line}": String(record.range.startLine),
+    "{end_line}": String(record.range.endLine),
+    "{start_line_id}": lineId(record.range.startLine),
+    "{end_line_id}": lineId(record.range.endLine),
+  }) as Questions;
+}
+
+function namingTargetFingerprint(
+  definition: AspectDefinition,
+  relativePath: string,
+  record: NamingRecord,
+  occurrence: number,
+): string {
+  return hash({
+    aspect: definition.id,
+    file: relativePath,
+    kind: record.kind,
+    qualifiedName: record.qualifiedName,
+    occurrence,
+  });
+}
+
+function namingSelection(
+  definition: AspectDefinition,
+  normalizedPaths: string[],
+  include: string[],
+  exclude: string[],
+  repository: string,
+  prepared: { entries: FileEntry[]; parsed: ParsedFile[]; complete: boolean },
+  sourceHashes: Record<string, string>,
+  errors: string[],
+): Selection {
+  const targets: PreparedTarget[] = [];
+  const diagnosticsByFile = new Map<string, string[]>();
+  for (const file of prepared.parsed) {
+    const diagnostics: string[] = [];
+    const records = namingDeclarations(file.ast, file.source, file.parseErrors ?? [], diagnostics);
+    if (diagnostics.length > 0) diagnosticsByFile.set(file.relativePath, diagnostics);
+    const occurrenceByIdentity = new Map<string, number>();
+    for (const record of records) {
+      const identity = `${record.kind}\u0000${record.qualifiedName}`;
+      const occurrence = (occurrenceByIdentity.get(identity) ?? 0) + 1;
+      occurrenceByIdentity.set(identity, occurrence);
+      const symbolKey = `n${String(occurrence).padStart(4, "0")}`;
+      const state = namingState(file.relativePath, record, file.source);
+      const questions = namingQuestions(definition, record, symbolKey);
+      let unjudgeableReason: string | undefined;
+      if (exceedsInputLimit(state, questions)) unjudgeableReason = "input_limit";
+      const evidence = evidenceSources(
+        file.relativePath,
+        sourceHashes[file.relativePath] ?? hashText(file.rawSource),
+        null,
+        sourceHashes,
+      );
+      targets.push({
+        fingerprint: namingTargetFingerprint(definition, file.relativePath, record, occurrence),
+        aspect: definition.id,
+        location: { file: file.relativePath, startLine: record.range.startLine, endLine: record.range.endLine },
+        target: { path: record.path, name: record.name },
+        contextMode: "focus",
+        inputHash: hash(state),
+        subjectRevision: subjectRevision(definition.propositionVersion, evidence),
+        evidenceSources: evidence,
+        state,
+        questions,
+        controls: { own: "not_available", sibling: "not_available" },
+        ...(unjudgeableReason ? { unjudgeableReason } : {}),
+      });
+    }
+  }
+  const scopeFiles: ScopeFile[] = prepared.entries.map((entry) => ({
+    file: entry.relativePath,
+    status: entry.status,
+    ...(entry.hash ? { hash: entry.hash } : {}),
+    ...((entry.reason || diagnosticsByFile.has(entry.relativePath)) ? {
+      reason: [entry.reason, ...(diagnosticsByFile.get(entry.relativePath) ?? [])].filter(Boolean).join("; "),
+    } : {}),
+  }));
+  return {
+    scope: {
+      repositoryId: repository,
+      id: scopeId(repository, normalizedPaths, include, exclude),
+      paths: normalizedPaths,
+      include,
+      exclude,
+      languages: LANGUAGE_NAMES,
+      selectionPolicy: "files@1",
+      enumerationComplete: prepared.complete && !errors.some((error) =>
+        error.startsWith("cannot enumerate") || error.startsWith("unsafe scope path")),
+      files: scopeFiles,
+    },
+    targets,
+    sourceHashes,
+    errors,
   };
 }
 
@@ -1005,6 +1345,9 @@ export async function selectTargets(
   const prepared = await prepareFileEntries(resolvedRoot, relativePaths, include, exclude, errors);
   const sourceHashes: Record<string, string> = {};
   for (const entry of prepared.entries) if (entry.hash) sourceHashes[entry.relativePath] = entry.hash;
+  if (definition.id === "naming-honesty") {
+    return namingSelection(definition, normalizedPaths, include, exclude, repository, prepared, sourceHashes, errors);
+  }
   const files = new Map(prepared.entries.map((entry) => [entry.relativePath, entry]));
   const targets: PreparedTarget[] = [];
   const diagnosticsByFile = new Map<string, string[]>();

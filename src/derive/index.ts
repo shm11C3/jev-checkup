@@ -38,6 +38,8 @@ const REQUIRED_PROPERTIES = [
   "hinges_on_unseen_rule",
   "verdict",
 ] as const;
+const NAMING_PROPERTIES = ["behavior_mismatch", "hidden_side_effect", "context_sufficient"] as const;
+const NAMING_CONTEXT_THRESHOLD = 0.7;
 
 type Property = string;
 type Answer = Record<string, unknown>;
@@ -231,11 +233,76 @@ function invalidJudgement(reason: string): Judgement {
   return { outcome: "not_judged", reason, suspicion: null, signal: null, band: null };
 }
 
+function namingQuestionIds(
+  target: PreparedTarget,
+): { ids: string[]; questions: Map<string, Question> } | { error: string } {
+  // Prepared naming targets carry the expanded, stable IDs. The saved target
+  // questions are authoritative, so a definition cannot supply omitted IDs.
+  const targetIds = Object.keys(target.questions);
+  const ids = targetIds;
+  if (ids.length !== NAMING_PROPERTIES.length || new Set(ids).size !== ids.length) {
+    return { error: "invalid_naming_question_ids" };
+  }
+  const questions = new Map<string, Question>();
+  const properties = new Set<string>();
+  for (const id of ids) {
+    const property = questionProperty(id);
+    if (!(NAMING_PROPERTIES as readonly string[]).includes(property) || properties.has(property)) {
+      return { error: "invalid_naming_question_ids" };
+    }
+    const question = target.questions[id];
+    if (!question) return { error: `missing_question:${property}` };
+    questions.set(id, question);
+    properties.add(property);
+  }
+  return { ids, questions };
+}
+
+function judgeNaming(answers: Answers, target: PreparedTarget, definition: AspectDefinition): Judgement {
+  if (!object(answers)) return invalidJudgement("answers_not_object");
+  const saved = namingQuestionIds(target);
+  if ("error" in saved) return invalidJudgement(saved.error);
+  const answerIds = Object.keys(answers);
+  if (answerIds.length !== saved.ids.length || !saved.ids.every(id => answerIds.includes(id))) {
+    return invalidJudgement("invalid_naming_answer_ids");
+  }
+
+  const values = new Map<string, number>();
+  for (const id of saved.ids) {
+    const answer = answers[id];
+    const question = saved.questions.get(id)!;
+    if (!answerObject(answer)) return invalidJudgement(`invalid_response:${questionProperty(id)}`);
+    const error = validateResponse(question, answer);
+    if (error) return invalidJudgement(`${error}:${questionProperty(id)}`);
+    const value = answer.noul;
+    if (!probability(value)) return invalidJudgement(`invalid_noul_probability:${questionProperty(id)}`);
+    values.set(questionProperty(id), value);
+  }
+
+  const mismatch = values.get("behavior_mismatch");
+  const sideEffect = values.get("hidden_side_effect");
+  const context = values.get("context_sufficient");
+  if (mismatch === undefined || sideEffect === undefined || context === undefined) {
+    return invalidJudgement("missing_naming_answer");
+  }
+  const suspicion = Math.max(mismatch, sideEffect);
+  const signal = suspicion - definition.thresholds.finding;
+  if (!finiteNumber(suspicion) || !finiteNumber(signal)) return invalidJudgement("invalid_composition");
+  if (context < NAMING_CONTEXT_THRESHOLD) {
+    return { outcome: "cannot_tell", reason: "insufficient_context", suspicion, signal, band: null };
+  }
+  if (suspicion >= definition.thresholds.finding) {
+    return { outcome: "finding", suspicion, signal, band: bandFor(signal, definition) };
+  }
+  return { outcome: "clean", suspicion, signal, band: null };
+}
+
 /** Derive one target's outcome from validated, raw question responses. */
 export function judge(answers: Answers, target: PreparedTarget, definition: AspectDefinition): Judgement {
   if (!validThresholds(definition) || !validWeights(definition) || !validBandEdges(definition)) {
     return invalidJudgement("invalid_definition");
   }
+  if (definition.id === "naming-honesty") return judgeNaming(answers, target, definition);
   const collected = collectAnswers(answers, target, definition);
   if (collected.error) return invalidJudgement(collected.error);
   const values = collected.values;
@@ -442,6 +509,35 @@ function toRunTarget(target: PreparedTarget, judgement: Judgement): RunTarget {
   };
 }
 
+/** Project a merged historical run onto one aspect before comparing it. */
+function projectHistoryAspect(run: Run, aspectId: AspectDefinition["id"]): Run {
+  const aspect = run.aspects.find(candidate => candidate.id === aspectId);
+  if (!aspect) return run;
+  const targets = run.targets.filter(target => target.aspect === aspectId);
+  const fingerprints = new Set(targets.map(target => target.fingerprint));
+  const findings = run.findings.filter(finding => finding.aspect === aspectId);
+  for (const finding of findings) fingerprints.add(finding.fingerprint);
+  const top = run.topFindings[aspectId] ?? [];
+  return {
+    ...run,
+    aspects: [{ ...aspect }],
+    scope: {
+      ...run.scope,
+      files: (aspect.selectionFiles ?? run.scope.files).map(file => ({ ...file })),
+    },
+    targets,
+    findings,
+    topFindings: { [aspectId]: [...top] },
+    resolved: run.resolved.filter(entry => fingerprints.has(entry.fingerprint)),
+    pendingComparisons: run.pendingComparisons.filter(entry => fingerprints.has(entry.fingerprint)),
+    total: {
+      score: aspect.score,
+      aspects: aspect.score === null ? 0 : 1,
+      weights: aspect.score === null ? {} : { [aspectId]: 1 },
+    },
+  };
+}
+
 function compatibleHistory(input: DeriveInput, condition: string): Run[] {
   const metadataAt = Date.parse(input.metadata.at);
   return input.history
@@ -453,6 +549,7 @@ function compatibleHistory(input: DeriveInput, condition: string): Run[] {
       && history.aspects.some(aspect => aspect.id === input.definition.id && aspect.condition === condition)
       && Number.isFinite(Date.parse(history.run.at))
       && (!Number.isFinite(metadataAt) || Date.parse(history.run.at) <= metadataAt))
+    .map(history => projectHistoryAspect(history, input.definition.id))
     .sort((a, b) => {
       const byDate = Date.parse(a.run.at) - Date.parse(b.run.at);
       return byDate || a.run.id.localeCompare(b.run.id);
@@ -730,6 +827,7 @@ function scoreAspect(
 function buildAspect(
   definition: AspectDefinition,
   condition: string,
+  selectionFiles: Run["scope"]["files"],
   targets: RunTarget[],
   findings: Finding[],
   labels: Map<string, Label>,
@@ -766,6 +864,7 @@ function buildAspect(
     id: definition.id,
     condition,
     definition,
+    selectionFiles: selectionFiles.map(file => ({ ...file })),
     calibration: { validation: "provisional", byContextMode },
     evaluated,
     cannotTell,
@@ -845,6 +944,7 @@ export function deriveRun(input: DeriveInput): Run {
   const aspect = buildAspect(
     definition,
     condition,
+    selection.scope.files,
     runTargets,
     rawFindings,
     matchingLabels,
@@ -885,5 +985,180 @@ export function deriveRun(input: DeriveInput): Run {
       selectionErrors: [...selection.errors],
     },
     usage: { ...input.usage },
+  };
+}
+
+function mergeScopeFiles(scopes: Run["scope"][]): Run["scope"]["files"] {
+  const byFile = new Map<string, Run["scope"]["files"][number]>();
+  const statusRank: Record<Run["scope"]["files"][number]["status"], number> = {
+    parsed: 0,
+    skipped: 1,
+    error: 2,
+  };
+  for (const scope of scopes) {
+    for (const file of scope.files) {
+      const existing = byFile.get(file.file);
+      if (!existing) {
+        byFile.set(file.file, { ...file });
+        continue;
+      }
+      if (existing.hash !== undefined && file.hash !== undefined && existing.hash !== file.hash) {
+        throw new Error(`Cannot merge aspect runs with different source hashes for ${file.file}`);
+      }
+      const status = statusRank[file.status] > statusRank[existing.status] ? file.status : existing.status;
+      const reasons = [...new Set([existing.reason, file.reason].filter((reason): reason is string => reason !== undefined))];
+      const fileHash = existing.hash ?? file.hash;
+      byFile.set(file.file, {
+        file: file.file,
+        status,
+        ...(fileHash === undefined ? {} : { hash: fileHash }),
+        ...(reasons.length > 0 ? { reason: reasons.join("; ") } : {}),
+      });
+    }
+  }
+  return [...byFile.values()].sort((a, b) => a.file.localeCompare(b.file));
+}
+
+function mergeAspectScope(scopes: Run["scope"][]): Run["scope"] {
+  const first = scopes[0]!;
+  const scopeIdentity = (scope: Run["scope"]) => ({
+    repositoryId: scope.repositoryId,
+    id: scope.id,
+    paths: scope.paths,
+    include: scope.include,
+    exclude: scope.exclude,
+    languages: scope.languages,
+    selectionPolicy: scope.selectionPolicy,
+  });
+  const identity = hash(scopeIdentity(first));
+  for (const scope of scopes.slice(1)) {
+    if (hash(scopeIdentity(scope)) !== identity) {
+      throw new Error("Cannot merge aspect runs with different scopes");
+    }
+  }
+  return {
+    ...first,
+    paths: [...first.paths],
+    include: [...first.include],
+    exclude: [...first.exclude],
+    languages: [...first.languages],
+    enumerationComplete: scopes.every(scope => scope.enumerationComplete),
+    files: mergeScopeFiles(scopes),
+  };
+}
+
+function mergeSnapshots(runs: Run[]): Run["snapshots"] {
+  const snapshots: Run["snapshots"] = {};
+  for (const run of runs) {
+    for (const [inputHash, snapshot] of Object.entries(run.snapshots)) {
+      const existing = snapshots[inputHash];
+      if (!existing) {
+        snapshots[inputHash] = {
+          state: snapshot.state,
+          questions: snapshot.questions,
+          ...(snapshot.questionsHash === undefined ? {} : { questionsHash: snapshot.questionsHash }),
+        };
+        continue;
+      }
+      if (hash(existing.state) !== hash(snapshot.state) || hash(existing.questions) !== hash(snapshot.questions)) {
+        throw new Error(`Cannot merge aspect runs with conflicting snapshot ${inputHash}`);
+      }
+      if (existing.questionsHash !== undefined && snapshot.questionsHash !== undefined
+        && existing.questionsHash !== snapshot.questionsHash) {
+        throw new Error(`Cannot merge aspect runs with conflicting question hash ${inputHash}`);
+      }
+      if (existing.questionsHash === undefined && snapshot.questionsHash !== undefined) {
+        existing.questionsHash = snapshot.questionsHash;
+      }
+    }
+  }
+  return snapshots;
+}
+
+function uniqueEntries<T>(entries: T[], key: (entry: T) => string): T[] {
+  const seen = new Set<string>();
+  return entries.filter(entry => {
+    const value = key(entry);
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+}
+
+/** Merge independently derived aspect runs while preserving aspect boundaries. */
+export function mergeAspectRuns(runs: Run[]): Run {
+  if (runs.length === 0) throw new Error("Cannot merge zero aspect runs");
+  const first = runs[0]!;
+  const aspectEntries = runs.flatMap(run => run.aspects);
+  const aspectIds = new Set<string>();
+  for (const aspect of aspectEntries) {
+    if (aspectIds.has(aspect.id)) throw new Error(`Duplicate aspect run: ${aspect.id}`);
+    aspectIds.add(aspect.id);
+  }
+  const metadataIdentity = hash({
+    id: first.run.id,
+    at: first.run.at,
+    commit: first.run.commit,
+    dirty: first.run.dirty,
+  });
+  for (const run of runs) {
+    if (run.schema !== first.schema || run.tool !== first.tool || hash({
+      id: run.run.id,
+      at: run.run.at,
+      commit: run.run.commit,
+      dirty: run.run.dirty,
+    }) !== metadataIdentity) {
+      throw new Error("Cannot merge aspect runs with different run metadata");
+    }
+  }
+
+  const scope = mergeAspectScope(runs.map(run => run.scope));
+  const aspects = aspectEntries.map(aspect => ({
+    ...aspect,
+    ...(aspect.selectionFiles === undefined ? {} : { selectionFiles: aspect.selectionFiles.map(file => ({ ...file })) }),
+  }));
+  const targets = runs.flatMap(run => run.targets);
+  const findings = runs.flatMap(run => run.findings);
+  const topFindings: Record<string, string[]> = {};
+  for (const aspect of aspects) {
+    const source = runs.find(run => run.topFindings[aspect.id] !== undefined);
+    topFindings[aspect.id] = [...(source?.topFindings[aspect.id] ?? [])];
+  }
+  const resolved = uniqueEntries(runs.flatMap(run => run.resolved), entry => `${entry.fingerprint}\u0000${entry.baselineRun}\u0000${entry.reason}`);
+  const pendingComparisons = uniqueEntries(
+    runs.flatMap(run => run.pendingComparisons),
+    entry => `${entry.fingerprint}\u0000${entry.baselineRun}\u0000${entry.reason}`,
+  );
+  const scored = aspects.filter(aspect => aspect.score !== null);
+  const weights = Object.fromEntries(scored.map(aspect => [aspect.id, 1 / scored.length]));
+  const totalScore = scored.length === 0
+    ? null
+    : scored.reduce((sum, aspect) => sum + aspect.score! / scored.length, 0);
+  const selectionErrors = [...new Set(runs.flatMap(run => run.unmeasured.selectionErrors ?? []))];
+  const usage = runs.reduce((sum, run) => ({
+    requests: sum.requests + run.usage.requests,
+    inputTokens: sum.inputTokens + run.usage.inputTokens,
+    cacheHits: sum.cacheHits + run.usage.cacheHits,
+  }), { requests: 0, inputTokens: 0, cacheHits: 0 });
+  return {
+    schema: first.schema,
+    tool: first.tool,
+    run: { ...first.run, complete: runs.every(run => run.run.complete) },
+    scope,
+    aspects,
+    targets,
+    findings,
+    snapshots: mergeSnapshots(runs),
+    topFindings,
+    resolved,
+    pendingComparisons,
+    total: { score: totalScore, aspects: scored.length, weights },
+    unmeasured: {
+      skippedFiles: scope.files.filter(file => file.status !== "parsed").length,
+      missRate: null,
+      populationPrecisionAtN: null,
+      selectionErrors,
+    },
+    usage,
   };
 }
