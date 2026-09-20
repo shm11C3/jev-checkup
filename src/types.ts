@@ -153,12 +153,12 @@ export interface Run {
   aspects: RunAspect[];
   targets: RunTarget[];
   findings: Finding[];
-  snapshots: Record<string, { state: Json; questions: Questions }>;
+  snapshots: Record<string, { state: Json; questions: Questions; questionsHash?: string }>;
   topFindings: Record<string, string[]>;
   resolved: { fingerprint: string; baselineRun: string; reason: "value_dropped" | "target_gone" }[];
   pendingComparisons: { fingerprint: string; baselineRun: string; reason: string }[];
   total: { score: number | null; aspects: number; weights: Record<string, number> };
-  unmeasured: { skippedFiles: number; missRate: null; populationPrecisionAtN: null };
+  unmeasured: { skippedFiles: number; missRate: null; populationPrecisionAtN: null; selectionErrors?: string[] };
   usage: Usage;
 }
 export interface DeriveInput {

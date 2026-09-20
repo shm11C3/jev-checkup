@@ -262,6 +262,46 @@ test("invalid observation makes the run incomplete and is retained in the target
   assert.equal(run.targets[0]!.outcome, "unevaluated");
 });
 
+test("selection errors persist when no file was selected", () => {
+  const selected = selection([]);
+  selected.scope.files = [];
+  selected.errors = ["enumeration_failed"];
+  const run = deriveRun(input({ selection: selected, observations: [] }));
+  assert.equal(run.run.complete, false);
+  assert.deepEqual(run.unmeasured.selectionErrors, ["enumeration_failed"]);
+  selected.errors.push("later_error");
+  assert.deepEqual(run.unmeasured.selectionErrors, ["enumeration_failed"]);
+});
+
+test("snapshot question hashes track instruction and criteria changes", () => {
+  const prepared = target("a");
+  const observation = [{ fingerprint: "a", answers: answers("t0001", { outcome_unasserted: noul(0.8) }) }];
+  const original = deriveRun(input({ selection: selection([prepared]), observations: observation }));
+  const inputHash = prepared.inputHash;
+  const originalSnapshot = original.snapshots[inputHash]!;
+  assert.equal(originalSnapshot.questionsHash, hash(originalSnapshot.questions));
+
+  const instructionsChanged = target("a");
+  const outcomeQuestion = instructionsChanged.questions["t0001__outcome_unasserted"]!;
+  instructionsChanged.questions = {
+    ...instructionsChanged.questions,
+    "t0001__outcome_unasserted": { ...outcomeQuestion, instructions: "Changed wording" },
+  };
+  const changedInstructionsRun = deriveRun(input({ selection: selection([instructionsChanged]), observations: observation }));
+  assert.equal(instructionsChanged.inputHash, inputHash);
+  assert.notEqual(changedInstructionsRun.snapshots[inputHash]!.questionsHash, originalSnapshot.questionsHash);
+
+  const criteriaChanged = target("a");
+  const specificityQuestion = criteriaChanged.questions["t0001__assertion_specificity"]!;
+  criteriaChanged.questions = {
+    ...criteriaChanged.questions,
+    "t0001__assertion_specificity": { ...specificityQuestion, criteria: ["exact", "partial", "changed"] },
+  };
+  const changedCriteriaRun = deriveRun(input({ selection: selection([criteriaChanged]), observations: observation }));
+  assert.equal(criteriaChanged.inputHash, inputHash);
+  assert.notEqual(changedCriteriaRun.snapshots[inputHash]!.questionsHash, originalSnapshot.questionsHash);
+});
+
 test("stale labels and labels omitting the target source cannot suppress findings", () => {
   for (const evidenceSources of [
     [{ file: "src/example.test.ts", hash: "previous-hash" }],

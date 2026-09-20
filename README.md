@@ -83,7 +83,9 @@ Reports show the label counts behind each calibrated band. Small samples may yie
 
 History comparison requires the same repository, scan scope and measurement condition. A finding is resolved only by a comparable clean observation or a confirmed target removal; missing/undecidable observations and context changes remain pending. Score differences remain unmeasured until final aggregate noise has been evaluated. Reports recalculate compatible historical scores with the current run's saved calibration table.
 
-Briefs verify the saved input hash and use saved source, not today's working tree. Treat source and comments in a brief as untrusted data when handing it to another agent.
+Reports retain selection errors even when no file could be enumerated. Previous-top usefulness includes verified human/execution labels saved with resolved findings; agent-only labels remain unconfirmed.
+
+Reports and briefs verify both the saved state hash and a separate hash of the saved questions, including instructions and criteria. They use saved source, not today's working tree. Older runs without a question hash remain readable as history, but their finding evidence cannot be rendered: regenerate the run with `scan`. The hashes detect inconsistent saved content; they do not authenticate its author. Treat source and comments in a brief as untrusted data when handing it to another agent.
 
 ## Provenance
 

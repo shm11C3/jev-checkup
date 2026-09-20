@@ -803,7 +803,13 @@ export function deriveRun(input: DeriveInput): Run {
     const prepared = preparedByFingerprint.get(target.fingerprint)!;
     const answers = answersByFingerprint.get(target.fingerprint);
     if (!answers) continue;
-    if (snapshots[target.inputHash] === undefined) snapshots[target.inputHash] = { state: prepared.state, questions: prepared.questions };
+    if (snapshots[target.inputHash] === undefined) {
+      snapshots[target.inputHash] = {
+        state: prepared.state,
+        questions: prepared.questions,
+        questionsHash: hash(prepared.questions),
+      };
+    }
     rawFindings.push({
       fingerprint: target.fingerprint,
       aspect: target.aspect,
@@ -876,6 +882,7 @@ export function deriveRun(input: DeriveInput): Run {
       skippedFiles: selection.scope.files.filter(file => file.status !== "parsed").length,
       missRate: null,
       populationPrecisionAtN: null,
+      selectionErrors: [...selection.errors],
     },
     usage: { ...input.usage },
   };

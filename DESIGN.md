@@ -387,7 +387,7 @@ unused                —      12     —     —        —  none          — 
 - **記入用のラベル行** (fingerprint、propositionVersion、subjectRevision、evidenceSources を埋める。追加の外部文脈を読んだ場合は証拠ファイルを更新する)
 
 `run.json` は finding 全件の評価時の state (必要なら inputHash ごとに重複排除) と質問定義を保持する。
-brief はその保存値を使い、現在の作業ツリーを読み直さない。出力前に inputHash と保存 state の一致を検証する。
+report / brief はその保存値を使い、現在の作業ツリーを読み直さない。出力前に inputHash と保存 state、questionsHash と保存質問 (instructions / criteria を含む) の一致を検証する。質問ハッシュのない旧実行は履歴として読めるが、その根拠の出力には scan による実行の再生成が必要。ハッシュは保存内容の不整合検出であり、作成者の認証ではない。
 古い形式などで断片が欠ける場合は、別の版のコードで補わず「評価時の断片なし」として brief の生成を失敗させる。
 report の通常表示・GitHub 投稿は断片を掲載せず、brief が明示的にコードを取り出す。
 
@@ -482,11 +482,11 @@ jev-checkup brief <run.json>     上位 N 件を、別の AI や人に渡す形�
     "labelTemplate": { "fingerprint": "7be1…", "propositionVersion": "test-title-honesty@1", "subjectRevision": "91c0…", "evidenceSources": [{ "file": "src/x.test.ts", "hash": "b13a…" }] },
     "label": null
   }],
-  "snapshots": { "in-01": { "state": "評価時の state 全体" } },
+  "snapshots": { "in-01": { "state": "評価時の state 全体", "questions": "評価時の質問定義", "questionsHash": "質問定義のハッシュ" } },
   "topFindings": { "test-honesty": ["7be1…"] },
   "resolved": [], "pendingComparisons": [],
   "total": { "score": null, "aspects": 0, "weights": { "test-honesty": 1 } },
-  "unmeasured": { "skippedFiles": 0, "missRate": null, "populationPrecisionAtN": null },
+  "unmeasured": { "skippedFiles": 0, "selectionErrors": [], "missRate": null, "populationPrecisionAtN": null },
   "usage": { "requests": 3, "inputTokens": 12000, "cacheHits": 0 }
 }
 ```

@@ -9,6 +9,13 @@ const score = (value: number | null | undefined): string => value == null ? "—
 const count = (value: number | null | undefined): string => value == null ? "—" : String(value);
 const deferred = (finding: Finding): boolean => ["accept", "defer", "dismiss"].includes(finding.label?.resolution ?? "");
 
+function verifiedSnapshot(run: Run, finding: Finding, output: string): Run["snapshots"][string] {
+  const snapshot = run.snapshots[finding.evidence.inputHash];
+  if (!snapshot || hash(snapshot.state) !== finding.evidence.inputHash) throw new Error(`Cannot create ${output}: evaluated snapshot is missing or its hash does not match`);
+  if (!snapshot.questionsHash || hash(snapshot.questions) !== snapshot.questionsHash) throw new Error(`Cannot create ${output}: saved questions hash is missing or does not match; regenerate the run with scan`);
+  return snapshot;
+}
+
 export function codeFence(value: string, language = ""): string {
   const longest = Math.max(2, ...[...value.matchAll(/`+/g)].map(m => m[0].length));
   const fence = "`".repeat(longest + 1);
@@ -76,8 +83,7 @@ export function renderReport(run: Run, format: "terminal" | "markdown" = "termin
       if (!target) throw new Error("Finding is missing its target manifest");
       lines.push(`- ${f.rank}. ${esc(target.location.file)}:${target.location.startLine} ${esc(target.target.name)}`);
       lines.push(`  ${esc(f.status)}; suspicion ${f.evidence.suspicion.toFixed(3)}; band ${esc(f.evidence.band)}; P(valid) ${score(f.evidence.pValid)}; ${esc(f.label?.resolution ?? "unreviewed")}`);
-      const snapshot = run.snapshots[f.evidence.inputHash];
-      if (!snapshot || hash(snapshot.state) !== f.evidence.inputHash) throw new Error("Cannot create report: evaluated snapshot is missing or its hash does not match");
+      const snapshot = verifiedSnapshot(run, f, "report");
       for (const [key, answer] of Object.entries(f.evidence.answers)) {
         const question = snapshot.questions[key];
         if (!question) throw new Error("Cannot create report: observed answer is missing its saved question");
@@ -113,6 +119,7 @@ export function renderReport(run: Run, format: "terminal" | "markdown" = "termin
   lines.push(`- Context: with production ${modes.focusprod}; test-only ${modes.focus}; controls available ${controlsAvailable}, missing ${controlsMissing}`);
   for (const [reason, n] of reasons) lines.push(`- ${esc(reason)}: ${n}`);
   lines.push(`- Skipped files: ${run.unmeasured.skippedFiles}; scan/parse failures: ${run.scope.files.filter(f => f.status === "error").length}`);
+  for (const error of run.unmeasured.selectionErrors ?? []) lines.push(`- Selection error: ${esc(error)}`);
   for (const file of run.scope.files) {
     if (file.reason) lines.push(`- ${esc(file.file)}: ${esc(file.reason)}`);
   }
@@ -127,10 +134,10 @@ export function renderReport(run: Run, format: "terminal" | "markdown" = "termin
     let useful = 0, notUseful = 0, unknown = 0, agent = 0;
     for (const id of ids) {
       const current = run.findings.find(f => f.fingerprint === id);
-      const label = current?.label;
+      const label = current ? current.label : prior.findings.find(f => f.fingerprint === id)?.label;
       if (!label) unknown++;
       else if (label.source === "agent") { agent++; unknown++; }
-      else if (label.source !== "human" || label.validity === "unknown" || (label.validity === "valid" && !label.priority)) unknown++;
+      else if (!["human", "execution"].includes(label.source) || label.validity === "unknown" || (label.validity === "valid" && !label.priority)) unknown++;
       else if (label.validity === "valid" && label.priority === "high") useful++;
       else notUseful++;
     }
@@ -149,8 +156,8 @@ export function renderBrief(run: Run, top = 10): string {
   if (!chosen.length) lines.push("No open findings.");
   for (const f of chosen) {
     const target = run.targets.find(t => t.fingerprint === f.fingerprint);
-    const snapshot = run.snapshots[f.evidence.inputHash];
-    if (!target || !snapshot || hash(snapshot.state) !== f.evidence.inputHash) throw new Error("Cannot create brief: evaluated snapshot is missing or its hash does not match");
+    if (!target) throw new Error("Cannot create brief: target manifest is missing");
+    const snapshot = verifiedSnapshot(run, f, "brief");
     lines.push(`## ${md(target.location.file)}:${target.location.startLine} — ${md(target.target.name)}`, "",
       `Suspicion: ${f.evidence.suspicion.toFixed(3)}; band: ${md(f.evidence.band)}; P(valid): ${score(f.evidence.pValid)}; context: ${md(target.contextMode)}.`,
       "", "### Evaluated context", "", codeFence(JSON.stringify(snapshot.state, null, 2), "json"),

@@ -52,6 +52,15 @@ export function validateRun(value: unknown): asserts value is Run {
     || !Array.isArray(value.aspects) || !Array.isArray(value.targets) || !Array.isArray(value.findings)
     || !object(value.snapshots) || !object(value.topFindings) || !Array.isArray(value.resolved)
     || !Array.isArray(value.pendingComparisons) || !object(value.total) || !object(value.usage) || !object(value.unmeasured)) throw new Error("Unsupported or invalid run.json");
+  if (value.unmeasured.selectionErrors !== undefined
+    && (!Array.isArray(value.unmeasured.selectionErrors) || value.unmeasured.selectionErrors.some(error => typeof error !== "string"))) {
+    throw new Error("Invalid selection errors in run.json");
+  }
+  for (const snapshot of Object.values(value.snapshots)) {
+    if (!object(snapshot) || (snapshot.questionsHash !== undefined && !nonempty(snapshot.questionsHash))) {
+      throw new Error("Invalid snapshot in run.json");
+    }
+  }
   for (const aspect of value.aspects) {
     if (!object(aspect) || !nonempty(aspect.id) || !nonempty(aspect.condition) || !object(aspect.definition)
       || !object(aspect.calibration) || !object(aspect.calibration.byContextMode) || !object(aspect.bandsByContextMode) || !object(aspect.comparison)

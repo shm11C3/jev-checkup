@@ -525,26 +525,27 @@ function targetContextAligned(source: string, folded: string, record: CallRecord
   return sourceLines(folded, record.range.startLine, record.range.endLine).includes(record.node.text());
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function replacePlaceholders(value: unknown, replacements: Record<string, string>): unknown {
-  if (typeof value === "string") {
-    let result = value;
-    for (const [placeholder, replacement] of Object.entries(replacements)) {
-      result = result.split(placeholder).join(replacement);
+  const placeholders = Object.keys(replacements).sort((left, right) => right.length - left.length);
+  const pattern = placeholders.length > 0
+    ? new RegExp(placeholders.map(escapeRegExp).join("|"), "g")
+    : null;
+  const replaceText = (text: string): string => pattern
+    ? text.replace(pattern, (placeholder) => replacements[placeholder] ?? placeholder)
+    : text;
+  const visit = (current: unknown): unknown => {
+    if (typeof current === "string") return replaceText(current);
+    if (Array.isArray(current)) return current.map(visit);
+    if (current !== null && typeof current === "object") {
+      return Object.fromEntries(Object.entries(current).map(([key, item]) => [replaceText(key), visit(item)]));
     }
-    return result;
-  }
-  if (Array.isArray(value)) return value.map((item) => replacePlaceholders(item, replacements));
-  if (value !== null && typeof value === "object") {
-    const replaceKey = (key: string): string => {
-      let result = key;
-      for (const [placeholder, replacement] of Object.entries(replacements)) {
-        result = result.split(placeholder).join(replacement);
-      }
-      return result;
-    };
-    return Object.fromEntries(Object.entries(value).map(([key, item]) => [replaceKey(key), replacePlaceholders(item, replacements)]));
-  }
-  return value;
+    return current;
+  };
+  return visit(value);
 }
 
 function targetQuestions(
@@ -793,12 +794,22 @@ function productionModule(
     : testStem;
   const imports = localImportSpecifiers(parsed.ast);
   const mocked = new Set(imports.filter((item) => item.mocked).map((item) => item.specifier));
+  const mockedCandidates = new Set<string>();
+  for (const specifier of mocked) {
+    for (const candidate of resolveRelativeImport(parsed.relativePath, specifier, files)) {
+      // A mock can use a directory or a different NodeNext extension from
+      // the import. Exclude every resolved candidate so a mock is never
+      // mistaken for production context through an alternate spelling.
+      mockedCandidates.add(candidate);
+    }
+  }
   const candidates = new Set<string>();
   for (const item of imports) {
     if (item.mocked || mocked.has(item.specifier)) continue;
     const resolvedBase = normaliseRelative(path.posix.join(path.posix.dirname(parsed.relativePath), item.specifier));
     const importedStem = resolvedBase ? moduleName(resolvedBase) : "";
     for (const candidate of resolveRelativeImport(parsed.relativePath, item.specifier, files)) {
+      if (mockedCandidates.has(candidate)) continue;
       const candidateBase = moduleName(candidate);
       const nameMatches = (value: string): boolean => value === basename || basename.startsWith(`${value}.`) || basename.endsWith(`.${value}`);
       if (nameMatches(candidateBase) || nameMatches(importedStem)) {

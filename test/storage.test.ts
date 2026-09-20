@@ -48,7 +48,7 @@ function fixture(value = row()): Run {
     }],
     targets: [],
     findings: [],
-    snapshots: {},
+    snapshots: { "snapshot-1": { state: { source: "fixture" }, questions: {} } },
     topFindings: {},
     resolved: [],
     pendingComparisons: [],
@@ -115,4 +115,38 @@ test("validateRun rejects a calibration denominator outside safe integer range",
   const pValid = valid / (valid + invalid);
   const value = row({ valid, invalid, prioritized: 0, high: 0, pValid, pHigh: null });
   assert.throws(() => validateRun(fixture(value)), /Invalid calibration band/);
+});
+
+test("validateRun accepts legacy and current optional persisted metadata", async t => {
+  const legacy = fixture();
+  assert.doesNotThrow(() => validateRun(legacy));
+
+  const current = fixture();
+  current.unmeasured.selectionErrors = ["enumeration_failed"];
+  current.snapshots["snapshot-1"]!.questionsHash = "question-hash";
+  assert.doesNotThrow(() => validateRun(current));
+
+  const directory = await mkdtemp(join(tmpdir(), "jev-storage-legacy-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const filename = join(directory, "run.json");
+  await writeRun(filename, legacy);
+  const loaded = await readRun(filename);
+  assert.equal(loaded.unmeasured.selectionErrors, undefined);
+  assert.equal(loaded.snapshots["snapshot-1"]!.questionsHash, undefined);
+});
+
+test("validateRun rejects malformed optional persisted metadata", () => {
+  const badSelectionErrors = [42, {}, ["ok", 42], null];
+  for (const value of badSelectionErrors) {
+    const run = fixture();
+    (run.unmeasured as unknown as Record<string, unknown>).selectionErrors = value;
+    assert.throws(() => validateRun(run), /Invalid selection errors/);
+  }
+
+  const badQuestionHashes = [42, {}, ""];
+  for (const value of badQuestionHashes) {
+    const run = fixture();
+    (run.snapshots["snapshot-1"] as unknown as Record<string, unknown>).questionsHash = value;
+    assert.throws(() => validateRun(run), /Invalid snapshot/);
+  }
 });

@@ -164,6 +164,22 @@ test("an explicit empty allow-list sends nothing and produces no health score", 
   assert.equal(run.usage.requests, 0);
 });
 
+test("an unsafe scope retains its selection error in the saved run and offline report", async t => {
+  const cwd = await repository(t);
+  const io = output();
+  const client: JudgeClient = { async systemOne() { throw new Error("must not send source"); } };
+  assert.equal(await runCli(["scan", "../outside"], { cwd, apiKey: null, client, ...io }), 1, io.err);
+  const filename = join(cwd, ".jev-checkup/run.json");
+  const run = await readRun(filename);
+  assert.equal(run.run.complete, false);
+  assert.equal(run.scope.files.length, 0);
+  assert.equal(run.usage.requests, 0);
+  assert.ok(run.unmeasured.selectionErrors?.some(error => error.includes("unsafe scope path")));
+  const report = output();
+  assert.equal(await runCli(["report", filename], { cwd, apiKey: null, ...report }), 0, report.err);
+  assert.match(report.out, /Selection error: unsafe scope path/);
+});
+
 test("a recoverable TSX diagnostic outside tests is visible without blocking safe tests", async t => {
   const cwd = await repository(t);
   await writeFile(join(cwd, "example.test.tsx"), `const link = <a href="https://example.test?x=y&labels=bug&body=z">link</a>;

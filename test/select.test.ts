@@ -272,6 +272,79 @@ test("keeps a whole-file parser failure incomplete", async () => {
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("expands placeholders once so literal tokens in titles, suites and snippets survive", async () => {
+  const root = await fixture({
+    "literal.test.ts": [
+      'describe("suite {title}", () => {',
+      '  it("title {describe_path}", () => {',
+      '    expect("{describe_path}").toBe("{describe_path}");',
+      "  });",
+      '  it("sibling {title}", () => {',
+      '    expect("{title}").toBe("{title}");',
+      "  });",
+      "});",
+      "",
+    ].join("\n"),
+  });
+  try {
+    const cfg = config();
+    const definition = getTestAspectDefinition(cfg);
+    definition.questions = {
+      "{test_key}__literal_{title}": {
+        type: "noul",
+        instructions: "title={title}; suite={describe_path}; own={own_snippet}; sibling={sibling_snippet}",
+      },
+    };
+    const selection = await selectTargets(root, ["."], cfg, definition);
+    const target = selection.targets.find((candidate) => candidate.target.name === "title {describe_path}");
+    assert.ok(target);
+    const keys = Object.keys(target.questions);
+    assert.deepEqual(keys, ["t0002__literal_title {describe_path}"]);
+    assert.equal(
+      target.questions[keys[0]!]!.instructions,
+      'title=title {describe_path}; suite=suite {title}; own=expect("{describe_path}").toBe("{describe_path}"); sibling=expect("{title}").toBe("{title}")',
+    );
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("does not attach a production module reached only through a mocked equivalent specifier", async () => {
+  const root = await fixture({
+    "widget.test.ts": [
+      'import { value } from "./widget.js";',
+      'jest.mock("./widget");',
+      'it("widget", () => { expect(value).toBe(1); });',
+      "",
+    ].join("\n"),
+    "widget.ts": "export const value = 1;",
+    "directory.test.ts": [
+      'import { value } from "./directory/index.js";',
+      'vi.mock("./directory");',
+      'it("directory", () => { expect(value).toBe(1); });',
+      "",
+    ].join("\n"),
+    "directory/index.ts": "export const value = 1;",
+    "raw.test.ts": [
+      'import { value } from "./raw.js";',
+      'jest.mock("./raw.js");',
+      'it("raw", () => { expect(value).toBe(1); });',
+      "",
+    ].join("\n"),
+    "raw.ts": "export const value = 1;",
+  });
+  try {
+    const cfg = config();
+    const selection = await selectTargets(root, ["."], cfg, getTestAspectDefinition(cfg));
+    for (const name of ["widget", "directory", "raw"]) {
+      const target = selection.targets.find((candidate) => candidate.target.name === name);
+      assert.ok(target);
+      assert.equal(target.contextMode, "focus");
+      assert.equal(target.contextReason, "no_unique_named_import");
+      assert.equal(target.evidenceSources.length, 1);
+      assert.ok(!(target.state as { source: string }).source.includes("production module under test:"));
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("an invalid scope never widens into a repository-wide selection", async () => {
   const root = await fixture({ "sample.test.ts": 'it("selected only on purpose", () => { expect(1).toBe(1); });' });
   try {
