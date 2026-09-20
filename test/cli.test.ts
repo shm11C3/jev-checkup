@@ -39,6 +39,30 @@ function output() {
   return { stdout: (s: string) => { stdout += s; }, stderr: (s: string) => { stderr += s; }, get out() { return stdout; }, get err() { return stderr; } };
 }
 
+test("same-line duplicate naming declarations keep independently renderable snapshots", async t => {
+  const cwd = await repository(t);
+  await writeFile(join(cwd, ".jev-checkup.yml"), "aspects: [naming-honesty]\n");
+  await writeFile(join(cwd, "duplicate.ts"), "class Example { run() { return 1; } run() { return 1; } }\n");
+  const client: JudgeClient = { async systemOne(request) {
+    return { model: request.model, answers: Object.fromEntries(Object.keys(request.questions).map(key => [key, {
+      type: "noul", noul: key.endsWith("__context_sufficient") ? 1 : key.endsWith("__behavior_mismatch") ? 0.9 : 0,
+    }])) };
+  } };
+  const scan = output();
+  assert.equal(await runCli(["scan", "duplicate.ts"], { cwd, apiKey: null, client, ...scan }), 0, scan.err);
+  const file = join(cwd, ".jev-checkup/run.json");
+  const run = await readRun(file);
+  assert.equal(run.findings.length, 2);
+  assert.equal(Object.keys(run.snapshots).length, 2);
+  const brief = output();
+  assert.equal(await runCli(["brief", file], { cwd, apiKey: null, ...brief }), 0, brief.err);
+  assert.match(brief.out, /n0001__behavior_mismatch/);
+  assert.match(brief.out, /n0002__behavior_mismatch/);
+  const cached = output();
+  assert.equal(await runCli(["scan", "duplicate.ts"], { cwd, apiKey: null, ...cached }), 0, cached.err);
+  assert.equal((await readRun(file)).usage.requests, 0);
+});
+
 test("dry-run needs no credentials, plans context and makes no writes or model calls", async t => {
   const cwd = await repository(t);
   const io = output();

@@ -825,12 +825,13 @@ function lineNumberAt(source: string, index: number): number {
   return source.slice(0, index).split("\n").length;
 }
 
-function namingState(relativePath: string, record: NamingRecord, source: string): Json {
+function namingState(relativePath: string, record: NamingRecord, source: string, symbolKey: string): Json {
   const context = source.slice(record.contextStart, record.range.end);
   return {
     file_path: relativePath,
     source: numberLinesFrom(context, lineNumberAt(source, record.contextStart)),
     target_symbol: {
+      symbol_key: symbolKey,
       kind: record.kind,
       qualified_name: record.qualifiedName,
       name: record.name,
@@ -890,7 +891,7 @@ function namingSelection(
       const occurrence = (occurrenceByIdentity.get(identity) ?? 0) + 1;
       occurrenceByIdentity.set(identity, occurrence);
       const symbolKey = `n${String(occurrence).padStart(4, "0")}`;
-      const state = namingState(file.relativePath, record, file.source);
+      const state = namingState(file.relativePath, record, file.source, symbolKey);
       const questions = namingQuestions(definition, record, symbolKey);
       let unjudgeableReason: string | undefined;
       if (exceedsInputLimit(state, questions)) unjudgeableReason = "input_limit";
