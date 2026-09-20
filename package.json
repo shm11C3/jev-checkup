@@ -1,0 +1,42 @@
+{
+  "name": "jev-checkup",
+  "version": "0.1.0",
+  "description": "Inspectable codebase health observations and review briefs",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "jev-checkup": "dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "src/config/schema.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "oxlint src test",
+    "format": "oxfmt src test",
+    "format:check": "oxfmt --check src test",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --import tsx --test test/*.test.ts",
+    "check": "npm run typecheck && npm test && npm run build",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "@ast-grep/napi": "0.45.3",
+    "@typesafe-ai/sdk": "0.6.0",
+    "minimatch": "10.2.6",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.4",
+    "oxfmt": "0.68.0",
+    "oxlint": "1.83.0",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "jev-checkup phase-1 configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "model": { "type": "string", "pattern": "^jev-[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "include": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "exclude": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "repositoryId": { "type": "string", "minLength": 1 },
+    "concurrency": { "type": "integer", "minimum": 1 },
+    "requestsPerMinute": { "type": "integer", "minimum": 1 },
+    "tokensPerSecond": { "type": "integer", "minimum": 1 },
+    "top": { "type": "integer", "minimum": 1 },
+    "aspects": { "const": ["test-honesty"] },
+    "thresholds": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "strong": { "type": "number", "minimum": 0, "maximum": 1 },
+        "unseen": { "type": "number", "minimum": 0, "maximum": 1 },
+        "midLow": { "type": "number", "minimum": 0, "maximum": 1 },
+        "midHigh": { "type": "number", "minimum": 0, "maximum": 1 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "finding": { "type": "number", "minimum": 0, "maximum": 1 },
+        "control": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    }
+  }
+}
