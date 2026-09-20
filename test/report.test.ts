@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { renderBrief, renderReport } from "../src/report/index.js";
+import { validateRun } from "../src/cli/storage.js";
 import { hash } from "../src/shared/hash.js";
 import { getTestAspectDefinition } from "../src/aspects/index.js";
 import { DEFAULT_CONFIG } from "../src/config/index.js";
@@ -51,6 +52,13 @@ test("report keeps uncalibrated score missing and escapes code-derived Markdown"
   assert.match(report, /score-noise threshold: unmeasured/);
 });
 
+test("saved calibration counts must be valid before a report can display them", () => {
+  const run = fixture();
+  validateRun(run);
+  run.aspects[0]!.calibration.byContextMode.focus.table["0.15..0.30"].valid = -1;
+  assert.throws(() => validateRun(run), /Invalid calibration band/);
+});
+
 test("compatible history is re-scored with current calibration, not historic score", () => {
   const run = fixture();
   const past = structuredClone(run);
@@ -58,8 +66,10 @@ test("compatible history is re-scored with current calibration, not historic sco
   const current = run.aspects[0]!;
   current.calibration.byContextMode.focus.source = "local";
   current.calibration.byContextMode.focus.table["0.15..0.30"].pValid = 0.75;
+  Object.assign(current.calibration.byContextMode.focus.table["0.15..0.30"], { valid: 3, invalid: 1, prioritized: 2, high: 1 });
   const report = renderReport(run, "terminal", [past]);
   assert.match(report, /score 0\.250/);
+  assert.match(report, /validity labels 4 \(valid 3, invalid 1\); prioritized valid labels 2 \(high 1\)/);
   assert.ok(!report.includes("score 0.123"));
   past.scope.id = "other";
   assert.match(renderReport(run, "terminal", [past]), /no compatible completed history/);

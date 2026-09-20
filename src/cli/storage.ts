@@ -50,6 +50,7 @@ export function validateRun(value: unknown): asserts value is Run {
       for (const band of ["0..0.05", "0.05..0.15", "0.15..0.30", ">=0.30"]) {
         const row = cal.table[band];
         if (!object(row) || !probability(row.pValid) || !probability(row.pHigh)
+          || ![row.valid, row.invalid, row.prioritized, row.high].every(count)
           || !count((aspect.bandsByContextMode[mode] as Record<string, unknown>)[band])) throw new Error("Invalid calibration band in run.json");
       }
     }

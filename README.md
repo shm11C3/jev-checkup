@@ -58,7 +58,11 @@ top: 10
 
 Include/exclude also apply to production context; an include pattern restricted to test filenames prevents attaching production modules. The selector folds other test bodies, preserves shared setup, and adds a uniquely resolved, unmocked production import whose name matches the test file. If production context cannot be added, it records the reason and uses test-only context. Unsupported constructs and parse failures are surfaced rather than considered clean.
 
-Production context currently resolves relative imports. Unresolved aliases such as `@/module` use test-only context and record `no_unique_named_import`.
+An explicit `include: []` selects no source files. Defaults apply only when the field is omitted.
+
+Production context resolves relative imports, including TypeScript source substitutions for runtime extensions (`.js`, `.mjs`, `.cjs`) and directory `index` modules. Unresolved aliases such as `@/module` use test-only context and record `no_unique_named_import`.
+
+Recoverable parser diagnostics are shown per file. Tests and suites overlapping an error are omitted; safely parsed tests can still be processed. A missing target in a file with diagnostics cannot establish a new or resolved finding. Whole-file parser failures leave the scan incomplete. A completed scan therefore does not imply exhaustive coverage of every syntax form.
 
 The default model is pinned. The request-size check estimates both `state + longest question` and `state + all questions`; it is not an exact tokenizer guarantee. Too-large inputs and API input-limit responses are reported as unjudgeable. Missing context remains `cannot_tell` rather than clean.
 
@@ -74,6 +78,8 @@ The default model is pinned. The request-size check estimates both `state + long
 AI-only labels stay `agent`; a successful tool run is not a human assessment of usefulness. Unknown labels do not enter the calibration denominator. Source changes invalidate labels and suppression decisions. If a review uses additional source files, add their hashes and recompute `subjectRevision` using the documented canonical hash in `src/shared/hash.ts`. Later records for the same revision supersede earlier ones.
 
 Calibration uses only matching labels and the same context mode and band; missing data stays uncalibrated. `accept`/`defer`/`dismiss` affect review placement, not truth. Labels do not change the raw finding outcome.
+
+Reports show the label counts behind each calibrated band. Small samples may yield probabilities of zero or one; a minimum sample size has not been validated. A clean scan with no calibration still has no score. The Open count excludes findings moved to `accept`, `defer` or `dismiss`, while those findings remain in raw evidence and scoring.
 
 History comparison requires the same repository, scan scope and measurement condition. A finding is resolved only by a comparable clean observation or a confirmed target removal; missing/undecidable observations and context changes remain pending. Score differences remain unmeasured until final aggregate noise has been evaluated. Reports recalculate compatible historical scores with the current run's saved calibration table.
 

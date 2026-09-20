@@ -44,6 +44,27 @@ function response(questionNames: string[], requestId = "request-1") {
   };
 }
 
+function requestError(
+  status: number | undefined,
+  extra: Record<string, unknown> = {},
+): Error & Record<string, unknown> {
+  const error = new Error(`request failed with secret body ${status ?? "transport"}`) as Error & Record<string, unknown>;
+  if (status !== undefined) error.status = status;
+  Object.assign(error, extra);
+  return error;
+}
+
+function fastObserveOptions(stateDir: string, client: JudgeClient) {
+  return {
+    stateDir,
+    concurrency: 1,
+    requestsPerMinute: Number.POSITIVE_INFINITY,
+    tokensPerSecond: Number.POSITIVE_INFINITY,
+    retryBackoffMs: 0,
+    client,
+  };
+}
+
 test("observes fresh answers, atomically caches them, and reuses cache without a key", async t => {
   const stateDir = await mkdtemp(join(tmpdir(), "jev-observe-"));
   t.after(() => rm(stateDir, { recursive: true, force: true }));
@@ -131,4 +152,158 @@ test("turns a fixed request timeout into an unevaluated observation", async t =>
   });
   assert.equal(result.observations[0]?.outcome, "unevaluated");
   assert.equal(result.observations[0]?.reason, "timeout");
+});
+
+test("retries transient failures through the limiter and counts each attempt", async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), "jev-observe-retry-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const prepared = target({ source: "transient source" });
+  const plan = await createPlan([prepared], definition, stateDir);
+  let calls = 0;
+  const client: JudgeClient = { systemOne: async () => {
+    calls++;
+    if (calls < 3) throw requestError(503);
+    return response(["q"], `request-${calls}`);
+  } };
+
+  const result = await observe(plan, definition, fastObserveOptions(stateDir, client));
+  assert.equal(calls, 3);
+  assert.equal(result.usage.requests, 3);
+  assert.equal(result.observations[0]?.answers.q?.noul, 0.8);
+});
+
+test("classifies final transient failures and preserves sanitized reasons", async t => {
+  const cases: [string, number | undefined, string][] = [
+    ["rate limit", 429, "rate_limited"],
+    ["server failure", 529, "server_error"],
+    ["transport failure", undefined, "request_failed"],
+  ];
+  for (const [label, status, reason] of cases) {
+    await t.test(label, async subtest => {
+      const stateDir = await mkdtemp(join(tmpdir(), "jev-observe-final-failure-"));
+      subtest.after(() => rm(stateDir, { recursive: true, force: true }));
+      const prepared = target({ source: label });
+      const plan = await createPlan([prepared], definition, stateDir);
+      let calls = 0;
+      const client: JudgeClient = { systemOne: async () => {
+        calls++;
+        throw requestError(status);
+      } };
+
+      const result = await observe(plan, definition, fastObserveOptions(stateDir, client));
+      assert.equal(calls, 3);
+      assert.equal(result.usage.requests, 3);
+      assert.equal(result.observations[0]?.outcome, "unevaluated");
+      assert.equal(result.observations[0]?.reason, reason);
+      assert.ok(!JSON.stringify(result).includes("secret body"));
+    });
+  }
+});
+
+test("a transient retry must wait for request capacity", async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), "jev-observe-retry-capacity-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const plan = await createPlan([target({ source: "retry capacity" })], definition, stateDir);
+  const controller = new AbortController();
+  let calls = 0;
+  const client: JudgeClient = { systemOne: async () => {
+    calls++;
+    setTimeout(() => controller.abort(), 5);
+    throw requestError(429);
+  } };
+  const result = await observe(plan, definition, {
+    ...fastObserveOptions(stateDir, client), requestsPerMinute: 60, signal: controller.signal,
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.usage.requests, 1);
+  assert.equal(result.observations[0]?.reason, "aborted");
+});
+
+test("a server delay outside the retry window never triggers an early retry", async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), "jev-observe-long-delay-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const plan = await createPlan([target({ source: "long retry delay" })], definition, stateDir);
+  let calls = 0;
+  const client: JudgeClient = { systemOne: async () => {
+    calls++;
+    throw requestError(429, { headers: { "retry-after": "3600" } });
+  } };
+  const result = await observe(plan, definition, fastObserveOptions(stateDir, client));
+  assert.equal(calls, 1);
+  assert.equal(result.observations[0]?.reason, "rate_limited");
+});
+
+test("does not retry authentication failures and stops queued work", async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), "jev-observe-auth-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const plan = await createPlan([
+    target({ source: "authentication failure" }),
+    target({ source: "queued after authentication failure" }),
+  ], definition, stateDir);
+  let calls = 0;
+  const client: JudgeClient = { systemOne: async () => {
+    calls++;
+    throw requestError(401);
+  } };
+
+  const result = await observe(plan, definition, {
+    ...fastObserveOptions(stateDir, client),
+    concurrency: 2,
+    requestsPerMinute: 1_200,
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.usage.requests, 1);
+  assert.deepEqual(result.observations.map(observation => observation.reason), ["auth_failed", "auth_failed"]);
+});
+
+test("honors a zero Retry-After and aborts while backing off", async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), "jev-observe-retry-abort-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const prepared = target({ source: "retry then abort" });
+  const plan = await createPlan([prepared], definition, stateDir);
+  const controller = new AbortController();
+  let calls = 0;
+  const client: JudgeClient = { systemOne: async () => {
+    calls++;
+    if (calls === 1) {
+      throw requestError(429, { headers: new Headers({ "Retry-After": "0" }) });
+    }
+    throw requestError(503);
+  } };
+  const running = observe(plan, definition, {
+    ...fastObserveOptions(stateDir, client),
+    retryBackoffMs: 1_000,
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 5);
+  const result = await running;
+  assert.equal(calls, 2);
+  assert.equal(result.usage.requests, 2);
+  assert.equal(result.observations[0]?.reason, "aborted");
+});
+
+test("aborts a request waiting in the limiter queue", async t => {
+  const stateDir = await mkdtemp(join(tmpdir(), "jev-observe-queued-abort-"));
+  t.after(() => rm(stateDir, { recursive: true, force: true }));
+  const plan = await createPlan([
+    target({ source: "first queued request" }),
+    target({ source: "second queued request" }),
+  ], definition, stateDir);
+  const controller = new AbortController();
+  let calls = 0;
+  const client: JudgeClient = { systemOne: async () => {
+    calls++;
+    return new Promise(() => undefined);
+  } };
+  const running = observe(plan, definition, {
+    ...fastObserveOptions(stateDir, client),
+    concurrency: 2,
+    requestsPerMinute: 1_200,
+    signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 5);
+  const result = await running;
+  assert.equal(calls, 1);
+  assert.equal(result.usage.requests, 1);
+  assert.deepEqual(result.observations.map(observation => observation.reason), ["aborted", "aborted"]);
 });

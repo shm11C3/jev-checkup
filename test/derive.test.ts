@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import test from "node:test";
 import { deriveRun, judge } from "../src/derive/index.js";
 import { hash, subjectRevision } from "../src/shared/hash.js";
@@ -12,6 +13,9 @@ import type {
   Run,
   Selection,
 } from "../src/types.js";
+
+const require = createRequire(import.meta.url);
+const packageMetadata = require("../package.json") as { version: string };
 
 const properties = [
   "outcome_unasserted",
@@ -174,6 +178,52 @@ test("malformed probability and choice responses are not judged", () => {
   assert.equal(judge(malformedChoice, target("a"), definition).outcome, "not_judged");
 });
 
+test("an uncalibrated clean scan has no score or total", () => {
+  const run = deriveRun(input());
+  assert.equal(run.targets[0]!.outcome, "clean");
+  assert.equal(run.aspects[0]!.score, null);
+  assert.equal(run.aspects[0]!.inTotal, false);
+  assert.equal(run.total.score, null);
+  assert.equal(run.total.aspects, 0);
+});
+
+test("run metadata uses the package version", () => {
+  assert.equal(deriveRun(input()).tool, packageMetadata.version);
+});
+
+test("review actions close findings without changing raw evidence or score", () => {
+  const prepared = target("a");
+  const label: Label = {
+    fingerprint: prepared.fingerprint,
+    propositionVersion: definition.propositionVersion,
+    subjectRevision: prepared.subjectRevision,
+    evidenceSources: prepared.evidenceSources,
+    validity: "valid",
+    priority: "high",
+    source: "human",
+  };
+  const baseline = deriveRun(input({
+    selection: selection([prepared]),
+    observations: [{ fingerprint: "a", answers: answers("t0001", { outcome_unasserted: noul(0.8) }) }],
+    labels: [label],
+  }));
+  assert.equal(baseline.findings.length, 1);
+  assert.equal(baseline.aspects[0]!.open, 1);
+  assert.equal(baseline.aspects[0]!.score, 0);
+
+  for (const resolution of ["accept", "defer", "dismiss"] as const) {
+    const run = deriveRun(input({
+      selection: selection([prepared]),
+      observations: [{ fingerprint: "a", answers: answers("t0001", { outcome_unasserted: noul(0.8) }) }],
+      labels: [{ ...label, resolution }],
+    }));
+    assert.equal(run.findings.length, 1);
+    assert.equal(run.aspects[0]!.open, 0);
+    assert.equal(run.aspects[0]!.score, baseline.aspects[0]!.score);
+    assert.deepEqual(run.topFindings[definition.id], []);
+  }
+});
+
 test("labels use current source hashes, recomputed revisions, and agent labels as provisional calibration", () => {
   const prepared = target("a");
   const extra = { file: "docs/fixture.md", hash: "extra-hash" };
@@ -258,6 +308,58 @@ test("selection diagnostics keep an omitted prior finding pending", () => {
   }));
   assert.equal(current.resolved.length, 0);
   assert.equal(current.pendingComparisons[0]?.reason, "selection_diagnostic");
+});
+
+test("a recoverable selection diagnostic does not erase the previous baseline", () => {
+  const first = deriveRun(input({
+    metadata: { id: "run-1", at: "2026-09-18T00:00:00.000Z", commit: null, dirty: false, complete: true },
+    observations: [{ fingerprint: "a", answers: answers("t0001", { outcome_unasserted: noul(0.8) }) }],
+  }));
+  const uncertainSelection = selection([]);
+  uncertainSelection.scope.files[0] = { file: "src/example.test.ts", status: "parsed", hash: "file-hash", reason: "parse_diagnostic:target_overlap" };
+  const uncertain = deriveRun(input({
+    selection: uncertainSelection,
+    observations: [],
+    metadata: { id: "run-2", at: "2026-09-19T00:00:00.000Z", commit: null, dirty: false, complete: true },
+    history: [first],
+  }));
+  assert.equal(uncertain.pendingComparisons[0]?.reason, "selection_diagnostic");
+
+  const returned = deriveRun(input({
+    selection: selection([target("a")]),
+    observations: [{ fingerprint: "a", answers: answers() }],
+    metadata: { id: "run-3", at: "2026-09-20T00:00:00.000Z", commit: null, dirty: false, complete: true },
+    history: [first, uncertain],
+  }));
+  assert.equal(returned.targets[0]!.outcome, "clean");
+  assert.deepEqual(returned.resolved, [{ fingerprint: "a", baselineRun: "run-1", reason: "value_dropped" }]);
+
+  const goneSelection = selection([]);
+  const gone = deriveRun(input({
+    selection: goneSelection,
+    observations: [],
+    metadata: { id: "run-3", at: "2026-09-20T00:00:00.000Z", commit: null, dirty: false, complete: true },
+    history: [first, uncertain],
+  }));
+  assert.deepEqual(gone.resolved, [{ fingerprint: "a", baselineRun: "run-1", reason: "target_gone" }]);
+});
+
+test("a selection diagnostic does not mark a fresh finding as new", () => {
+  const previousSelection = selection([]);
+  previousSelection.scope.files[0] = { file: "src/example.test.ts", status: "parsed", hash: "file-hash", reason: "parse_diagnostic:target_overlap" };
+  const previous = deriveRun(input({
+    selection: previousSelection,
+    observations: [],
+    metadata: { id: "run-1", at: "2026-09-19T00:00:00.000Z", commit: null, dirty: false, complete: true },
+  }));
+  const current = deriveRun(input({
+    selection: selection([target("fresh")]),
+    observations: [{ fingerprint: "fresh", answers: answers("t0001", { outcome_unasserted: noul(0.8) }) }],
+    metadata: { id: "run-2", at: "2026-09-20T00:00:00.000Z", commit: null, dirty: false, complete: true },
+    history: [previous],
+  }));
+  assert.equal(current.findings[0]!.status, "uncompared");
+  assert.deepEqual(current.pendingComparisons, [{ fingerprint: "fresh", baselineRun: "run-1", reason: "selection_diagnostic" }]);
 });
 
 test("an inconclusive prior run prevents target_gone resolution", () => {

@@ -12,6 +12,7 @@ import { observe, type JudgeClient } from "../observe/index.js";
 import { deriveRun } from "../derive/index.js";
 import { renderBrief, renderReport } from "../report/index.js";
 import { readHistory, readLabels, readRun, writeRun } from "./storage.js";
+import { VERSION } from "../shared/version.js";
 
 const HELP = `jev-checkup — provisional test-honesty observations
 
@@ -63,7 +64,7 @@ export async function runCli(args: string[], env: CliEnvironment = {}): Promise<
       top: { type: "string" },
     } });
     if (values.help || args.length === 0) { stdout(HELP); return 0; }
-    if (values.version) { stdout("0.1.0\n"); return 0; }
+    if (values.version) { stdout(`${VERSION}\n`); return 0; }
     const command = positionals[0];
     const allowed: Record<string, string[]> = {
       scan: ["dry-run", "config", "state-dir", "out", "history", "labels"],

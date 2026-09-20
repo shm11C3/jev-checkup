@@ -64,6 +64,10 @@ export interface JudgeClient {
 }
 
 export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_TRANSIENT_RETRIES = 2;
+const DEFAULT_RETRY_BACKOFF_MS = 500;
+const MAX_RETRY_BACKOFF_MS = 5_000;
+const MAX_RETRY_AFTER_MS = 60_000;
 
 class RequestTimeoutError extends Error {
   constructor() {
@@ -113,6 +117,35 @@ function isAbortError(error: unknown): boolean {
 function errorStatus(error: unknown): number | undefined {
   if (!isRecord(error) || typeof error.status !== "number") return undefined;
   return error.status;
+}
+
+function errorHeader(error: unknown, name: string): string | undefined {
+  if (!isRecord(error) || !isRecord(error.headers)) return undefined;
+  const headers = error.headers;
+  const get = headers.get;
+  if (typeof get === "function") {
+    const value = get.call(headers, name);
+    if (typeof value === "string") return value;
+  }
+  for (const [key, value] of Object.entries(headers)) {
+    if (key.toLowerCase() === name && typeof value === "string") return value;
+  }
+  return undefined;
+}
+
+function retryAfterMs(error: unknown): number | undefined {
+  if (isRecord(error) && finiteNonNegative(error.retryAfterMs)) return error.retryAfterMs;
+  const retryAfterMsHeader = errorHeader(error, "retry-after-ms");
+  if (retryAfterMsHeader !== undefined) {
+    const value = Number(retryAfterMsHeader);
+    if (Number.isFinite(value) && value >= 0) return value;
+  }
+  const retryAfter = errorHeader(error, "retry-after");
+  if (retryAfter === undefined) return undefined;
+  const seconds = Number(retryAfter);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const date = Date.parse(retryAfter);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
 }
 
 function errorMessage(error: unknown): string {
@@ -244,9 +277,10 @@ function requestRateInterval(requestsPerMinute: number): number {
 }
 
 /**
- * Adapter around the official @typesafe-ai/sdk.  SDK retries are left enabled;
- * this adapter only translates the stable internal contract and suppresses SDK
- * request/body logging at the observation boundary.
+ * Adapter around the official @typesafe-ai/sdk.  SDK retries are disabled so
+ * observation owns attempt scheduling and request accounting.  The adapter
+ * only translates the stable internal contract and suppresses SDK request/body
+ * logging at the observation boundary.
  */
 class TypeSafeJudgeClient implements JudgeClient {
   private readonly client: TypeSafeClient;
@@ -257,6 +291,7 @@ class TypeSafeJudgeClient implements JudgeClient {
       defaultModel: model,
       logLevel: "off",
       timeout,
+      retry: { maxRetries: 0 },
     });
   }
 
@@ -299,6 +334,7 @@ async function callWithTimeout(
   request: JudgeRequest,
   signal: AbortSignal | undefined,
   timeoutMs: number,
+  onStart?: () => void,
 ): Promise<JudgeResponse> {
   if (signal?.aborted) throw new RequestAbortedError();
 
@@ -315,10 +351,13 @@ async function callWithTimeout(
   let timer: ReturnType<typeof setTimeout> | undefined;
   let timedOut = false;
   try {
-    const result = Promise.resolve().then(() => client.systemOne(request, {
-      signal: controller.signal,
-      timeout: timeoutMs,
-    }));
+    const result = Promise.resolve().then(() => {
+      onStart?.();
+      return client.systemOne(request, {
+        signal: controller.signal,
+        timeout: timeoutMs,
+      });
+    });
     const timeoutResult = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
         timedOut = true;
@@ -397,6 +436,8 @@ interface ObserveContext {
   countedRequestIds: Set<string>;
   client: JudgeClient | undefined;
   clientFailure: string | undefined;
+  authFailure: boolean;
+  authStopController: AbortController;
 }
 
 export interface ObserveOptions {
@@ -409,6 +450,10 @@ export interface ObserveOptions {
   client?: JudgeClient;
   /** Optional test/host override; production defaults to a fixed timeout. */
   timeoutMs?: number;
+  /** Optional test/host override for the bounded transient retry budget. */
+  maxRetries?: number;
+  /** Optional test/host override for the first transient retry backoff. */
+  retryBackoffMs?: number;
 }
 
 function hasConfiguredApiKey(apiKey: string | undefined): boolean {
@@ -424,6 +469,42 @@ function addFreshUsage(context: ObserveContext, response: unknown): void {
 
 function makeUnevaluated(item: PlanItem, reason: string): Observation {
   return resultWithCached(item, "unevaluated", reason);
+}
+
+type RequestFailureReason = "auth_failed" | "rate_limited" | "server_error" | "request_failed";
+
+function requestFailureReason(error: unknown): RequestFailureReason {
+  const status = errorStatus(error);
+  if (status === 401 || status === 403) return "auth_failed";
+  if (status === 429) return "rate_limited";
+  if (status !== undefined && status >= 500 && status <= 599) return "server_error";
+  return "request_failed";
+}
+
+function isTransientFailure(error: unknown): boolean {
+  const status = errorStatus(error);
+  if (status === 408 || status === 429) return true;
+  if (status !== undefined) return status >= 500 && status <= 599;
+  return true;
+}
+
+function configuredRetryCount(options: ObserveOptions): number {
+  return Number.isSafeInteger(options.maxRetries) && options.maxRetries !== undefined && options.maxRetries >= 0
+    ? options.maxRetries
+    : DEFAULT_MAX_TRANSIENT_RETRIES;
+}
+
+function retryDelay(error: unknown, retryIndex: number, options: ObserveOptions): number | undefined {
+  const serverDelay = retryAfterMs(error);
+  if (serverDelay !== undefined) {
+    // Never retry before a server-provided delay that exceeds our bounded
+    // retry window; the caller will return the classified failure instead.
+    if (serverDelay > MAX_RETRY_AFTER_MS) return undefined;
+    return serverDelay;
+  }
+  const configured = options.retryBackoffMs;
+  const initial = finiteNonNegative(configured) ? configured : DEFAULT_RETRY_BACKOFF_MS;
+  return Math.min(initial * 2 ** retryIndex, MAX_RETRY_BACKOFF_MS);
 }
 
 async function ensureClient(context: ObserveContext): Promise<JudgeClient | undefined> {
@@ -466,43 +547,71 @@ async function observeItem(item: PlanItem, context: ObserveContext): Promise<Obs
   }
 
   if (options.signal?.aborted) return makeUnevaluated(item, "aborted");
+  if (context.authFailure) return makeUnevaluated(item, "auth_failed");
   const client = await ensureClient(context);
   if (!client) return makeUnevaluated(item, context.clientFailure ?? "client_unavailable");
 
-  let reserved: boolean;
-  try {
-    await context.limiter.reserve(item.estimatedTokens, options.signal);
-    reserved = true;
-  } catch (error) {
-    reserved = false;
-    if (error instanceof RequestAbortedError || options.signal?.aborted) {
-      return makeUnevaluated(item, "aborted");
-    }
-    return makeUnevaluated(item, "rate_limited");
-  }
-  if (!reserved) return makeUnevaluated(item, "rate_limited");
-
-  context.usage.requests += 1;
+  const limiterSignal = context.authStopController.signal;
   const request: JudgeRequest = {
     state: item.target.state,
     questions: item.missingQuestions,
     model: definition.model,
   };
-  let response: unknown;
-  try {
-    response = await callWithTimeout(
-      client,
-      request,
-      options.signal,
-      options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
-    );
-  } catch (error) {
-    if (error instanceof RequestTimeoutError) return makeUnevaluated(item, "timeout");
-    if (error instanceof RequestAbortedError || options.signal?.aborted) return makeUnevaluated(item, "aborted");
-    if (isInputLimitError(error)) {
-      return resultWithCached(item, "unjudgeable", "input_limit");
+  const maxRetries = configuredRetryCount(options);
+  let response: JudgeResponse;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await context.limiter.reserve(item.estimatedTokens, limiterSignal);
+    } catch (error) {
+      if (context.authFailure) return makeUnevaluated(item, "auth_failed");
+      if (error instanceof RequestAbortedError || options.signal?.aborted) {
+        return makeUnevaluated(item, "aborted");
+      }
+      return makeUnevaluated(item, "rate_limited");
     }
-    return makeUnevaluated(item, "request_failed");
+
+    // An authentication failure ends the run for work that was still queued.
+    // Requests already inside the client cannot be recalled, but no new attempt
+    // should be started after the shared failure is observed.
+    if (context.authFailure) return makeUnevaluated(item, "auth_failed");
+    if (options.signal?.aborted) return makeUnevaluated(item, "aborted");
+
+    try {
+      response = await callWithTimeout(
+        client,
+        request,
+        options.signal,
+        options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+        () => { context.usage.requests += 1; },
+      );
+      break;
+    } catch (error) {
+      if (error instanceof RequestTimeoutError) return makeUnevaluated(item, "timeout");
+      if (error instanceof RequestAbortedError || options.signal?.aborted) return makeUnevaluated(item, "aborted");
+      if (isInputLimitError(error)) {
+        return resultWithCached(item, "unjudgeable", "input_limit");
+      }
+
+      const reason = requestFailureReason(error);
+      if (reason === "auth_failed") {
+        context.authFailure = true;
+        context.authStopController.abort();
+      }
+      if (!isTransientFailure(error) || attempt >= maxRetries) return makeUnevaluated(item, reason);
+      if (context.authFailure) return makeUnevaluated(item, reason);
+
+      try {
+        const delay = retryDelay(error, attempt, options);
+        if (delay === undefined) return makeUnevaluated(item, reason);
+        await waitFor(delay, limiterSignal);
+      } catch (waitError) {
+        if (context.authFailure) return makeUnevaluated(item, "auth_failed");
+        if (waitError instanceof RequestAbortedError || options.signal?.aborted) {
+          return makeUnevaluated(item, "aborted");
+        }
+        return makeUnevaluated(item, reason);
+      }
+    }
   }
 
   addFreshUsage(context, response);
@@ -545,6 +654,10 @@ export async function observe(
   options: ObserveOptions,
 ): Promise<ObserveResult> {
   const usage: Usage = { requests: 0, inputTokens: 0, cacheHits: 0 };
+  const authStopController = new AbortController();
+  const onExternalAbort = () => authStopController.abort();
+  options.signal?.addEventListener("abort", onExternalAbort, { once: true });
+  if (options.signal?.aborted) authStopController.abort();
   const limiter = new StartRateLimiter(
     requestRateInterval(options.requestsPerMinute),
     positiveOrInfinity(options.tokensPerSecond),
@@ -557,6 +670,8 @@ export async function observe(
     countedRequestIds: new Set(),
     client: options.client,
     clientFailure: undefined,
+    authFailure: false,
+    authStopController,
   };
   const observations: Observation[] = new Array(plan.items.length);
   let next = 0;
@@ -576,6 +691,10 @@ export async function observe(
     }
   }
 
-  await Promise.all(Array.from({ length: workerCount }, () => worker()));
-  return { observations, usage };
+  try {
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    return { observations, usage };
+  } finally {
+    options.signal?.removeEventListener("abort", onExternalAbort);
+  }
 }

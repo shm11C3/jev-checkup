@@ -1,4 +1,5 @@
 import { hash, subjectRevision } from "../shared/hash.js";
+import { VERSION } from "../shared/version.js";
 import type {
   Answers,
   AspectDefinition,
@@ -493,25 +494,34 @@ function referenceFor(
   fingerprint: string,
   contextMode: ContextMode,
   currentExists: boolean,
+  currentScope: DeriveInput["selection"]["scope"],
+  currentTarget?: RunTarget,
 ): Reference {
   if (runs.length === 0) return { kind: "none" };
-  const latest = runs[runs.length - 1]!;
-  const latestTarget = latest.targets.find(target => target.fingerprint === fingerprint);
-  if (!latestTarget) return currentExists ? { kind: "none" } : { kind: "already_gone" };
-  if (latestTarget.contextMode !== contextMode) {
-    const fallback = latestConclusive(runs, fingerprint);
-    return {
-      kind: "context_mismatch",
-      run: fallback?.run ?? latest,
-      target: fallback?.target ?? latestTarget,
-    };
-  }
+
+  // A recoverable parser/selection diagnostic may omit a target from a run.
+  // Keep its last known location so that omission can be distinguished from
+  // a diagnostic-free run in which the target population is known absent.
+  const knownTarget = [...runs].reverse()
+    .flatMap(run => run.targets)
+    .find(target => target.fingerprint === fingerprint);
+  const locationTarget = knownTarget ?? currentTarget;
+  const currentUncertain = !currentExists
+    && locationTarget !== undefined
+    && targetRemovalUncertain(currentScope, locationTarget);
 
   let sawNonconclusive = false;
+  let sawSelectionDiagnostic = false;
   for (let index = runs.length - 1; index >= 0; index--) {
     const run = runs[index]!;
     const target = run.targets.find(candidate => candidate.fingerprint === fingerprint);
-    if (!target) return currentExists ? { kind: "none" } : { kind: "already_gone" };
+    if (!target) {
+      if (locationTarget !== undefined && targetRemovalUncertain(run.scope, locationTarget)) {
+        sawSelectionDiagnostic = true;
+        continue;
+      }
+      return currentExists ? { kind: "none" } : { kind: "already_gone" };
+    }
     if (target.contextMode !== contextMode) {
       const fallback = latestConclusive(runs.slice(0, index + 1), fingerprint);
       return {
@@ -521,6 +531,9 @@ function referenceFor(
       };
     }
     if (target.outcome === "finding" || target.outcome === "clean") {
+      if (currentUncertain) {
+        return { kind: "pending", run, target, reason: "selection_diagnostic" };
+      }
       if (!currentExists && sawNonconclusive && target.outcome === "finding") {
         return { kind: "pending", run, target, reason: "prior_run_not_conclusive" };
       }
@@ -530,9 +543,18 @@ function referenceFor(
   }
 
   const fallback = latestConclusive(runs, fingerprint);
-  return fallback
-    ? { kind: "pending", run: fallback.run, target: fallback.target, reason: "prior_run_not_conclusive" }
-    : { kind: "pending", run: latest, target: latestTarget, reason: "prior_run_not_conclusive" };
+  if (fallback) {
+    return {
+      kind: "pending",
+      run: fallback.run,
+      target: fallback.target,
+      reason: currentUncertain ? "selection_diagnostic" : "prior_run_not_conclusive",
+    };
+  }
+  if (sawSelectionDiagnostic) {
+    return { kind: "pending", run: runs[runs.length - 1]!, reason: "selection_diagnostic" };
+  }
+  return { kind: "none" };
 }
 
 function appendPending(
@@ -581,9 +603,10 @@ function applyHistory(
   for (const fingerprint of allFingerprints) {
     const current = currentByFingerprint.get(fingerprint);
     const prepared = preparedByFingerprint.get(fingerprint);
-    const mode = current?.contextMode ?? runs.at(-1)?.targets.find(target => target.fingerprint === fingerprint)?.contextMode;
+    const mode = current?.contextMode
+      ?? [...runs].reverse().flatMap(run => run.targets).find(target => target.fingerprint === fingerprint)?.contextMode;
     if (!mode) continue;
-    const reference = referenceFor(runs, fingerprint, mode, current !== undefined);
+    const reference = referenceFor(runs, fingerprint, mode, current !== undefined, scope, current);
     const currentFinding = currentFindings.get(fingerprint);
 
     if (!currentComplete) {
@@ -673,6 +696,10 @@ function priorityComplete(findings: Finding[]): boolean {
   return findings.length === 0 || findings.every(finding => finding.evidence.pValid !== null && finding.evidence.pHigh !== null);
 }
 
+function isActionable(finding: Finding): boolean {
+  return !["accept", "defer", "dismiss"].includes(finding.label?.resolution ?? "");
+}
+
 function rankFindings(findings: Finding[], top: number): { findings: Finding[]; top: string[] } {
   const calibrated = priorityComplete(findings);
   const rankScore = (finding: Finding): number => calibrated
@@ -686,8 +713,7 @@ function rankFindings(findings: Finding[], top: number): { findings: Finding[]; 
     return a.fingerprint.localeCompare(b.fingerprint);
   });
   ordered.forEach((finding, index) => { finding.rank = index + 1; });
-  const deferred = new Set(["accept", "defer", "dismiss"]);
-  const open = ordered.filter(finding => !deferred.has(finding.label?.resolution ?? ""));
+  const open = ordered.filter(isActionable);
   return { findings: ordered, top: open.slice(0, Math.max(0, top)).map(finding => finding.fingerprint) };
 }
 
@@ -696,7 +722,7 @@ function scoreAspect(
   findings: Finding[],
 ): number | null {
   const evaluated = targets.filter(target => target.outcome === "finding" || target.outcome === "clean");
-  if (evaluated.length === 0 || findings.some(finding => finding.evidence.pValid === null)) return null;
+  if (evaluated.length === 0 || findings.length === 0 || findings.some(finding => finding.evidence.pValid === null)) return null;
   const expectedInvalid = findings.reduce((sum, finding) => sum + (finding.evidence.pValid ?? 0), 0);
   return 1 - expectedInvalid / evaluated.length;
 }
@@ -747,7 +773,7 @@ function buildAspect(
     unjudgeable,
     unevaluated,
     bandsByContextMode,
-    open: findings.length,
+    open: findings.filter(isActionable).length,
     score,
     inTotal: score !== null,
     comparison,
@@ -824,7 +850,7 @@ export function deriveRun(input: DeriveInput): Run {
   const totalScore = aspect.score;
   return {
     schema: 1,
-    tool: "jev-checkup",
+    tool: VERSION,
     run: { ...input.metadata, complete: currentComplete },
     scope: {
       ...selection.scope,

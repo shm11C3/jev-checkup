@@ -10,7 +10,7 @@ import type { Config } from "../src/types.js";
 function config(overrides: Partial<Config> = {}): Config {
   return {
     model: "jev-1.13.0",
-    include: [],
+    include: ["**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}"],
     exclude: [],
     concurrency: 1,
     requestsPerMinute: 1_200,
@@ -131,6 +131,144 @@ test("folds Japanese and emoji source using JavaScript string offsets", async ()
     assert.ok(state.source.includes('expect("保持😀").toBe("保持😀")'));
     assert.ok(!state.source.includes('expect("隠す😀")'));
     assert.ok(state.source.includes('it("別の確認", () => {'));
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("preserves target lines after folding multiple preceding siblings", async () => {
+  const source = [
+    'describe("並び", () => {',
+    '  it("一行", () => { expect("隠す一行").toBe("隠す一行"); });',
+    '  it("空の改行", () => {',
+    '  });',
+    '  it("複数行😀", () => {',
+    '    expect("隠す複数行😀").toBe("隠す複数行😀");',
+    '  });',
+    '  it("対象😀", () => {',
+    '    expect("保持😀").toBe("保持😀");',
+    '  });',
+    '});',
+    "",
+  ].join("\n");
+  const root = await fixture({ "ordered.test.ts": source });
+  try {
+    const selection = await selectTargets(root, ["."], config(), getTestAspectDefinition(config()));
+    const target = selection.targets.find((candidate) => candidate.target.name === "対象😀");
+    assert.ok(target);
+    const state = target.state as { source: string; target_tests: Record<string, { first_line: string; last_line: string; code: string }> };
+    const key = Object.keys(state.target_tests)[0]!;
+    const targetTest = state.target_tests[key]!;
+    const sourceLines = state.source.split("\n");
+    const firstLine = sourceLines.find((line) => line.startsWith(`${targetTest.first_line}| `));
+    assert.ok(firstLine?.includes('it("対象😀"'));
+    assert.ok(targetTest.code.split("\n")[0]?.includes('it("対象😀"'));
+    assert.equal(source.split("\n").length, state.source.split("\n").length);
+    assert.equal(targetTest.last_line, "L0010");
+    for (const candidate of selection.targets) {
+      const candidateState = candidate.state as { source: string; target_tests: Record<string, { first_line: string; code: string }> };
+      const candidateTest = candidateState.target_tests[Object.keys(candidateState.target_tests)[0]!]!;
+      assert.ok(candidateTest.code.split("\n")[0]?.includes(candidate.target.name));
+      assert.ok(candidateState.source.split("\n").find((line) => line.startsWith(`${candidateTest.first_line}| `))?.includes(candidate.target.name));
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("does not select tagged-table each calls and records a diagnostic", async () => {
+  const root = await fixture({
+    "tagged.test.ts": [
+      "test.each`value`(\"tagged test\", () => { expect(true).toBe(true); });",
+      "describe.each`value`(\"tagged suite\", () => {",
+      "  it(\"nested\", () => { expect(true).toBe(true); });",
+      "});",
+      "",
+    ].join("\n"),
+  });
+  try {
+    const selection = await selectTargets(root, ["."], config(), getTestAspectDefinition(config()));
+    assert.equal(selection.targets.length, 0);
+    assert.match(selection.scope.files[0]?.reason ?? "", /dynamic or unsupported (?:test|describe)/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("keeps an explicit empty include allow-list empty", async () => {
+  const root = await fixture({ "sample.test.ts": 'it("never selected", () => { expect(true).toBe(true); });' });
+  try {
+    const selection = await selectTargets(root, ["."], config({ include: [] }), getTestAspectDefinition(config({ include: [] })));
+    assert.equal(selection.targets.length, 0);
+    assert.deepEqual(selection.scope.include, []);
+    assert.equal(selection.scope.files[0]?.reason, "not_included");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("resolves NodeNext runtime extensions and index modules deterministically", async () => {
+  const root = await fixture({
+    "widget.test.ts": 'import { value } from "./widget.js"; it("widget", () => { expect(value).toBe(1); });',
+    "widget.ts": "export const value = 1;",
+    "feature.test.ts": 'import { value } from "./feature.mjs"; it("feature", () => { expect(value).toBe(1); });',
+    "feature.mts": "export const value = 1;",
+    "legacy.test.ts": 'import { value } from "./legacy.cjs"; it("legacy", () => { expect(value).toBe(1); });',
+    "legacy.cts": "export const value = 1;",
+    "indexcase.test.ts": 'import { value } from "./indexcase/index.js"; it("indexcase", () => { expect(value).toBe(1); });',
+    "indexcase/index.ts": "export const value = 1;",
+    "ambiguous.test.ts": 'import { value } from "./ambiguous.js"; it("ambiguous", () => { expect(value).toBe(1); });',
+    "ambiguous.ts": "export const value = 1;",
+    "ambiguous.tsx": "export const value = 1;",
+  });
+  try {
+    const selection = await selectTargets(root, ["."], config(), getTestAspectDefinition(config()));
+    for (const [name, production] of [["widget", "widget.ts"], ["feature", "feature.mts"], ["legacy", "legacy.cts"], ["indexcase", "indexcase/index.ts"]] as const) {
+      const target = selection.targets.find((candidate) => candidate.target.name === name);
+      assert.ok(target);
+      assert.equal(target.contextMode, "focusprod");
+      assert.ok((target.state as { source: string }).source.includes(`production module under test: ${production}`));
+    }
+    const ambiguous = selection.targets.find((candidate) => candidate.target.name === "ambiguous");
+    assert.equal(ambiguous?.contextMode, "focus");
+    assert.equal(ambiguous?.contextReason, "no_unique_named_import");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("recovers parser diagnostics outside tests but skips overlapping tests", async () => {
+  const safeRoot = await fixture({
+    "safe.test.tsx": [
+      'const link = <a href="https://example.test?x=y&labels=bug&body=z">link</a>;',
+      'it("safe one", () => { expect(link).toBeDefined(); });',
+      'it("safe two", () => { expect(link).toBeDefined(); });',
+      "",
+    ].join("\n"),
+  });
+  const unsafeRoot = await fixture({
+    "unsafe.test.tsx": [
+      'it("bad", () => { const link = <a href="https://example.test?x=y&labels=bug&body=z">link</a>; expect(link).toBeDefined(); });',
+      'it("safe", () => { expect(true).toBe(true); });',
+      "",
+    ].join("\n"),
+  });
+  try {
+    const safe = await selectTargets(safeRoot, ["."], config(), getTestAspectDefinition(config()));
+    assert.equal(safe.targets.length, 2);
+    assert.equal(safe.scope.enumerationComplete, true);
+    assert.match(safe.scope.files[0]?.reason ?? "", /parse_diagnostic/);
+    assert.deepEqual(safe.errors, []);
+
+    const unsafe = await selectTargets(unsafeRoot, ["."], config(), getTestAspectDefinition(config()));
+    assert.equal(unsafe.targets.length, 1);
+    assert.equal(unsafe.targets[0]?.target.name, "safe");
+    assert.equal(unsafe.scope.enumerationComplete, true);
+    assert.match(unsafe.scope.files[0]?.reason ?? "", /parse_diagnostic/);
+  } finally {
+    await rm(safeRoot, { recursive: true, force: true });
+    await rm(unsafeRoot, { recursive: true, force: true });
+  }
+});
+
+test("keeps a whole-file parser failure incomplete", async () => {
+  const root = await fixture({ "broken.ts": "<<<" });
+  try {
+    const selection = await selectTargets(root, ["."], config(), getTestAspectDefinition(config()));
+    assert.equal(selection.targets.length, 0);
+    assert.equal(selection.scope.enumerationComplete, false);
+    assert.ok(selection.errors.some((error) => error.includes("parse error")));
+    assert.equal(selection.scope.files[0]?.reason, "parse_error");
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

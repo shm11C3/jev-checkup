@@ -87,6 +87,13 @@ export function renderReport(run: Run, format: "terminal" | "markdown" = "termin
   lines.push("", markdown ? "## Unmeasured and limitations" : "Unmeasured and limitations");
   for (const a of run.aspects) {
     lines.push(`- ${esc(a.id)}: cannot tell ${a.cannotTell}; not judged ${a.notJudged}; input/unjudgeable ${a.unjudgeable}; unevaluated ${a.unevaluated}`);
+    for (const mode of ["focus", "focusprod"] as const) {
+      for (const band of bands) {
+        const row = a.calibration.byContextMode[mode].table[band];
+        if (!row || row.valid + row.invalid === 0) continue;
+        lines.push(`- Calibration ${esc(a.id)} / ${mode} / ${esc(band)}: validity labels ${row.valid + row.invalid} (valid ${row.valid}, invalid ${row.invalid}); prioritized valid labels ${row.prioritized} (high ${row.high}).`);
+      }
+    }
   }
   const modes = { focus: 0, focusprod: 0 };
   const reasons = new Map<string, number>();
@@ -104,6 +111,7 @@ export function renderReport(run: Run, format: "terminal" | "markdown" = "termin
   }
   lines.push("- Population Precision@N, miss rate and score-noise threshold: unmeasured.",
     "- Calibration is provisional. Agent labels are not independent human validation.",
+    "- Small calibration samples can produce extreme probabilities; no minimum sample size has been validated.",
     "- Missing context, non-English text and instructions inside source may influence judgements.");
   for (const a of run.aspects) {
     const prior = compatibleHistory(run, history, a).at(-1);

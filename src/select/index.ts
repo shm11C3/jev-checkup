@@ -91,6 +91,7 @@ interface ParsedFile {
   rawSource: string;
   source: string;
   ast: Ast;
+  parseErrors?: RangeInfo[];
 }
 
 interface FileEntry {
@@ -288,6 +289,22 @@ function testTitleAndCallback(node: Ast): {
   };
 }
 
+function overlaps(left: RangeInfo, right: RangeInfo): boolean {
+  return left.start < right.end && right.start < left.end;
+}
+
+function hasOverlappingParseError(range: RangeInfo, parseErrors: RangeInfo[]): boolean {
+  return parseErrors.some((parseError) => overlaps(range, parseError));
+}
+
+function isTaggedEachFactoryCall(node: Ast): boolean {
+  const functionNode = field(node, "function");
+  if (!functionNode || functionNode.kind() !== "call_expression") return false;
+  const factoryCallee = inspectCallee(field(functionNode, "function"));
+  if (!factoryCallee || !isEachCall(factoryCallee) || factoryCallee.factoryCall) return false;
+  return field(functionNode, "arguments")?.kind() === "template_string";
+}
+
 function isDynamicFamilyCall(node: Ast): boolean {
   const functionNode = field(node, "function");
   if (!functionNode) return false;
@@ -299,7 +316,12 @@ function isDynamicFamilyCall(node: Ast): boolean {
   return identifier !== null;
 }
 
-function describeCalls(calls: Ast[], source: string, diagnostics: string[]): DescribeRecord[] {
+function describeCalls(
+  calls: Ast[],
+  source: string,
+  diagnostics: string[],
+  parseErrors: RangeInfo[] = [],
+): DescribeRecord[] {
   const describes: DescribeRecord[] = [];
   for (const node of calls) {
     if (classifyFamily(node) !== "describe") continue;
@@ -307,9 +329,13 @@ function describeCalls(calls: Ast[], source: string, diagnostics: string[]): Des
     if (callee && isEachCall(callee) && !callee.factoryCall && directArguments(node).length === 1) continue;
     const info = testTitleAndCallback(node);
     const range = rangeOf(node, source);
-    const dynamic = !callee || !supportedModifiers(callee.modifiers) ||
-      (isEachCall(callee) && !callee.factoryCall) || info.title === null || info.callback === null;
-    if (dynamic) {
+    const parseDiagnostic = hasOverlappingParseError(range, parseErrors);
+    const dynamic = parseDiagnostic || !callee || !supportedModifiers(callee.modifiers) ||
+      (isEachCall(callee) && !callee.factoryCall) || isTaggedEachFactoryCall(node) ||
+      info.title === null || info.callback === null;
+    if (parseDiagnostic) {
+      diagnostics.push(`parse_diagnostic overlaps describe at line ${range.startLine}`);
+    } else if (dynamic) {
       diagnostics.push(`dynamic or unsupported describe name/form at line ${range.startLine}`);
     }
     const modifiers = callee?.modifiers ?? [];
@@ -332,6 +358,7 @@ function testCalls(
   source: string,
   describes: DescribeRecord[],
   diagnostics: string[],
+  parseErrors: RangeInfo[] = [],
 ): { records: CallRecord[]; skipped: number } {
   const records: CallRecord[] = [];
   let skipped = 0;
@@ -342,8 +369,13 @@ function testCalls(
     if (callee && isEachCall(callee) && !callee.factoryCall && directArguments(node).length === 1) continue;
     const info = testTitleAndCallback(node);
     const dynamic = !callee || !supportedModifiers(callee.modifiers) ||
-      (isEachCall(callee) && !callee.factoryCall) || info.title === null || info.callback === null;
+      (isEachCall(callee) && !callee.factoryCall) || isTaggedEachFactoryCall(node) ||
+      info.title === null || info.callback === null;
     const modifiers = callee?.modifiers ?? [];
+    if (hasOverlappingParseError(range, parseErrors)) {
+      diagnostics.push(`parse_diagnostic overlaps test at line ${range.startLine}`);
+      continue;
+    }
     const skip = modifiers.includes("skip") || modifiers.includes("todo");
     if (skip && info.title !== null) {
       skipped += 1;
@@ -447,7 +479,10 @@ function foldBodyText(source: string, body: RangeInfo): string {
   if (lineBreaks === 0) return `{ ${omitted} }`;
   const lineStart = source.lastIndexOf("\n", body.start) + 1;
   const indent = source.slice(lineStart, body.start).match(/^[ \t]*/)?.[0] ?? "";
-  return `{\n${indent}${omitted}${"\n".repeat(Math.max(0, lineBreaks - 1))}\n${indent}}`;
+  // Keep exactly the same number of line breaks as the original body.  The
+  // opening break accounts for the first one; the remaining breaks can stay
+  // between the omission marker and the closing brace.
+  return `{\n${indent}${omitted}${"\n".repeat(lineBreaks - 1)}${indent}}`;
 }
 
 function foldedSource(source: string, records: CallRecord[], target: CallRecord): string {
@@ -477,6 +512,17 @@ function foldedSource(source: string, records: CallRecord[], target: CallRecord)
 
 function extractLines(source: string, startLine: number, endLine: number): string {
   return numberLines(source, "L").split("\n").slice(startLine - 1, endLine).join("\n");
+}
+
+function sourceLines(source: string, startLine: number, endLine: number): string {
+  return source.split("\n").slice(startLine - 1, endLine).join("\n");
+}
+
+function targetContextAligned(source: string, folded: string, record: CallRecord): boolean {
+  const sourceLineBreaks = (source.match(/\n/g) ?? []).length;
+  const foldedLineBreaks = (folded.match(/\n/g) ?? []).length;
+  if (sourceLineBreaks !== foldedLineBreaks) return false;
+  return sourceLines(folded, record.range.startLine, record.range.endLine).includes(record.node.text());
 }
 
 function replacePlaceholders(value: unknown, replacements: Record<string, string>): unknown {
@@ -587,7 +633,7 @@ function matchesAny(relativePath: string, patterns: string[]): boolean {
 }
 
 function effectivePatterns(config: Config): { include: string[]; exclude: string[] } {
-  const include = config.include?.length ? [...config.include] : [...DEFAULT_INCLUDE];
+  const include = config.include === undefined ? [...DEFAULT_INCLUDE] : [...config.include];
   return {
     include: [...new Set(include.map((value) => value.replaceAll("\\", "/")))].sort(),
     exclude: [...new Set((config.exclude ?? []).map((value) => value.replaceAll("\\", "/")))].sort(),
@@ -650,9 +696,22 @@ function parseFile(relativePath: string, rawSource: string): ParsedFile {
   return { relativePath, rawSource, source, ast };
 }
 
-function parseHasErrors(ast: Ast): boolean {
+function parseErrorNodes(ast: Ast): Ast[] {
+  if (ast.kind() === "ERROR") return [ast];
+  return ast.findAll({ rule: { kind: "ERROR" } } as never) as Ast[];
+}
+
+function parseErrorRanges(ast: Ast, source: string): RangeInfo[] {
+  return parseErrorNodes(ast).map((node) => rangeOf(node, source));
+}
+
+function isWholeFileParseFailure(ast: Ast, source: string, parseErrors: RangeInfo[]): boolean {
   if (ast.kind() === "ERROR") return true;
-  return (ast.findAll({ rule: { kind: "ERROR" } } as never) as Ast[]).length > 0;
+  const firstContent = source.search(/\S/);
+  if (firstContent < 0) return false;
+  let lastContent = source.length;
+  while (lastContent > firstContent && /\s/.test(source[lastContent - 1]!)) lastContent -= 1;
+  return parseErrors.some((error) => error.start <= firstContent && error.end >= lastContent);
 }
 
 function importSpecifier(node: Ast): string | null {
@@ -696,28 +755,51 @@ function resolveRelativeImport(
   if (!base) return [];
   const candidates: string[] = [];
   const extension = path.posix.extname(base);
-  if (extension) candidates.push(base);
-  else {
+  if (extension) {
+    candidates.push(base);
+    // NodeNext source imports keep the runtime extension in source.  For
+    // example, `./widget.js` commonly resolves to widget.ts/tsx.  Preserve a
+    // stable order and let productionModule reject multiple existing matches
+    // instead of choosing one arbitrarily.
+    const sourceSubstitutions: Record<string, string[]> = {
+      ".js": [".ts", ".tsx"],
+      ".mjs": [".mts"],
+      ".cjs": [".cts"],
+    };
+    for (const suffix of sourceSubstitutions[extension] ?? []) {
+      candidates.push(`${base.slice(0, -extension.length)}${suffix}`);
+    }
+  } else {
     for (const suffix of SOURCE_EXTENSIONS) candidates.push(`${base}${suffix}`);
     for (const suffix of SOURCE_EXTENSIONS) candidates.push(path.posix.join(base, `index${suffix}`));
   }
   return candidates.filter((candidate) => files.has(candidate));
 }
 
+function moduleName(relativePath: string): string {
+  const extension = path.posix.extname(relativePath);
+  const basename = path.posix.basename(relativePath, extension);
+  if (basename !== "index") return basename;
+  return path.posix.basename(path.posix.dirname(relativePath));
+}
+
 function productionModule(
   parsed: ParsedFile,
   files: Map<string, FileEntry>,
 ): { file: ParsedFile | null; reason?: string } {
-  const basename = path.posix.basename(parsed.relativePath, path.posix.extname(parsed.relativePath)).replace(TEST_SUFFIX, "");
+  const testStem = path.posix.basename(parsed.relativePath, path.posix.extname(parsed.relativePath)).replace(TEST_SUFFIX, "");
+  const basename = testStem === "index"
+    ? path.posix.basename(path.posix.dirname(parsed.relativePath))
+    : testStem;
   const imports = localImportSpecifiers(parsed.ast);
   const mocked = new Set(imports.filter((item) => item.mocked).map((item) => item.specifier));
   const candidates = new Set<string>();
   for (const item of imports) {
     if (item.mocked || mocked.has(item.specifier)) continue;
     const resolvedBase = normaliseRelative(path.posix.join(path.posix.dirname(parsed.relativePath), item.specifier));
-    const importedStem = resolvedBase ? path.posix.basename(resolvedBase, path.posix.extname(resolvedBase)) : "";
+    const importedStem = resolvedBase ? moduleName(resolvedBase) : "";
     for (const candidate of resolveRelativeImport(parsed.relativePath, item.specifier, files)) {
-      const candidateBase = path.posix.basename(candidate, path.posix.extname(candidate));
+      const candidateBase = moduleName(candidate);
       const nameMatches = (value: string): boolean => value === basename || basename.startsWith(`${value}.`) || basename.endsWith(`.${value}`);
       if (nameMatches(candidateBase) || nameMatches(importedStem)) {
         candidates.add(candidate);
@@ -850,7 +932,16 @@ async function prepareFileEntries(
     entry.hash = hashText(rawSource);
     try {
       const file = parseFile(relativePath, rawSource);
-      if (parseHasErrors(file.ast)) {
+      if (file.ast.kind() === "ERROR") {
+        entry.status = "error";
+        entry.reason = "parse_error";
+        entries.push(entry);
+        complete = false;
+        errors.push(`${relativePath}: parse error`);
+        continue;
+      }
+      const parseErrors = parseErrorRanges(file.ast, file.source);
+      if (isWholeFileParseFailure(file.ast, file.source, parseErrors)) {
         entry.status = "error";
         entry.reason = "parse_error";
         entries.push(entry);
@@ -859,11 +950,14 @@ async function prepareFileEntries(
         continue;
       }
       entry.status = "parsed";
+      if (parseErrors.length > 0) {
+        entry.reason = `parse_diagnostic (${parseErrors.length} parser error${parseErrors.length === 1 ? "" : "s"})`;
+      }
       entry.rawSource = file.rawSource;
       entry.source = file.source;
       entry.ast = file.ast;
       entries.push(entry);
-      parsed.push(file);
+      parsed.push({ ...file, parseErrors });
     } catch (error) {
       entry.status = "error";
       entry.reason = "parse_error";
@@ -911,8 +1005,9 @@ export async function selectTargets(
   for (const file of parsedTests) {
     const calls = callExpressions(file.ast);
     const diagnostics: string[] = [];
-    const describes = describeCalls(calls, file.source, diagnostics);
-    const tests = testCalls(calls, file.source, describes, diagnostics);
+    const parseErrors = file.parseErrors ?? [];
+    const describes = describeCalls(calls, file.source, diagnostics, parseErrors);
+    const tests = testCalls(calls, file.source, describes, diagnostics, parseErrors);
     if (tests.skipped > 0) diagnostics.push(`skipped tests: ${tests.skipped}`);
     if (diagnostics.length > 0) diagnosticsByFile.set(file.relativePath, diagnostics);
     if (tests.records.length === 0) continue;
@@ -937,8 +1032,12 @@ export async function selectTargets(
         questions = targetQuestions(definition, record, file.source, ownSnippet, siblingSnippet, folded);
       }
       let unjudgeableReason: string | undefined;
+      if (!targetContextAligned(file.source, folded, record)) {
+        unjudgeableReason = "context_alignment_failed";
+        contextReason = contextReason ?? "context_alignment_failed";
+      }
       if (exceedsInputLimit(state, questions)) {
-        unjudgeableReason = "input_limit";
+        unjudgeableReason = unjudgeableReason ?? "input_limit";
         contextReason = contextReason ?? "input_limit";
       }
       // Evidence describes the files a reviewer would need to validate the

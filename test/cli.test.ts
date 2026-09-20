@@ -126,3 +126,35 @@ test("unsupported budget option fails before any request or output write", async
   assert.equal(await runCli(["scan", "--max-cost", "1"], { cwd, apiKey: null, ...io }), 2);
   await assert.rejects(access(join(cwd, ".jev-checkup/run.json")));
 });
+
+test("an explicit empty allow-list sends nothing and produces no health score", async t => {
+  const cwd = await repository(t);
+  await writeFile(join(cwd, ".jev-checkup.yml"), "include: []\n");
+  const io = output();
+  let calls = 0;
+  const client: JudgeClient = { async systemOne() { calls++; throw new Error("must not send source"); } };
+  assert.equal(await runCli(["scan"], { cwd, apiKey: null, client, ...io }), 0, io.err);
+  assert.equal(calls, 0);
+  const run = await readRun(join(cwd, ".jev-checkup/run.json"));
+  assert.equal(run.targets.length, 0);
+  assert.equal(run.total.score, null);
+  assert.equal(run.usage.requests, 0);
+});
+
+test("a recoverable TSX diagnostic outside tests is visible without blocking safe tests", async t => {
+  const cwd = await repository(t);
+  await writeFile(join(cwd, "example.test.tsx"), `const link = <a href="https://example.test?x=y&labels=bug&body=z">link</a>;
+it('preserves the link', () => { expect(link).toBeDefined(); });
+`);
+  const io = output();
+  const client: JudgeClient = { async systemOne(request) {
+    return { model: request.model, answers: answers(request.questions, false), usage: { input_tokens: 100 } };
+  } };
+  assert.equal(await runCli(["scan"], { cwd, apiKey: null, client, ...io }), 0, io.err);
+  const run = await readRun(join(cwd, ".jev-checkup/run.json"));
+  assert.equal(run.run.complete, true);
+  assert.equal(run.targets.length, 2);
+  assert.ok(run.scope.files.find(f => f.file === "example.test.tsx")?.reason);
+  assert.match(io.out, /parse_diagnostic/);
+  assert.equal(run.total.score, null);
+});
