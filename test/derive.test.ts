@@ -296,19 +296,21 @@ test("a compatible baseline marks a newly selected finding as new", () => {
   assert.equal(current.aspects[0]!.comparison.new, 1);
 });
 
-test("selection diagnostics keep an omitted prior finding pending", () => {
-  const first = deriveRun(input({ metadata: { id: "run-1", at: "2026-09-19T00:00:00.000Z", commit: null, dirty: false, complete: true }, observations: [{ fingerprint: "a", answers: answers("t0001", { outcome_unasserted: noul(0.8) }) }] }));
-  const currentSelection = selection([]);
-  currentSelection.scope.files[0] = { file: "src/example.test.ts", status: "parsed", hash: "file-hash", reason: "dynamic test name" };
-  const current = deriveRun(input({
-    selection: currentSelection,
-    observations: [],
-    metadata: { id: "run-2", at: "2026-09-20T00:00:00.000Z", commit: null, dirty: false, complete: true },
-    history: [first],
-  }));
-  assert.equal(current.resolved.length, 0);
-  assert.equal(current.pendingComparisons[0]?.reason, "selection_diagnostic");
-});
+for (const reason of ["dynamic test name", "skipped tests: 1"]) {
+  test(`selection diagnostic (${reason}) keeps an omitted prior finding pending`, () => {
+    const first = deriveRun(input({ metadata: { id: "run-1", at: "2026-09-19T00:00:00.000Z", commit: null, dirty: false, complete: true }, observations: [{ fingerprint: "a", answers: answers("t0001", { outcome_unasserted: noul(0.8) }) }] }));
+    const currentSelection = selection([]);
+    currentSelection.scope.files[0] = { file: "src/example.test.ts", status: "parsed", hash: "file-hash", reason };
+    const current = deriveRun(input({
+      selection: currentSelection,
+      observations: [],
+      metadata: { id: "run-2", at: "2026-09-20T00:00:00.000Z", commit: null, dirty: false, complete: true },
+      history: [first],
+    }));
+    assert.equal(current.resolved.length, 0);
+    assert.equal(current.pendingComparisons[0]?.reason, "selection_diagnostic");
+  });
+}
 
 test("a recoverable selection diagnostic does not erase the previous baseline", () => {
   const first = deriveRun(input({

@@ -9,6 +9,18 @@ const relativePath = (value: unknown): value is string => nonempty(value) && !is
 const count = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 const probability = (value: unknown): boolean => value === null || (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1);
 
+function validCalibrationRow(value: Record<string, unknown>): boolean {
+  const { valid, invalid, prioritized, high, pValid, pHigh } = value;
+  if (!count(valid) || !count(invalid) || !count(prioritized) || !count(high)
+    || !probability(pValid) || !probability(pHigh)
+    || high > prioritized || prioritized > valid) return false;
+  const validityCount = valid + invalid;
+  if (!Number.isSafeInteger(validityCount)) return false;
+  const expectedPValid = validityCount === 0 ? null : valid / validityCount;
+  const expectedPHigh = prioritized === 0 ? null : high / prioritized;
+  return pValid === expectedPValid && pHigh === expectedPHigh;
+}
+
 export async function readLabels(filename: string, optional = true): Promise<Label[]> {
   let text: string;
   try { text = await readFile(filename, "utf8"); }
@@ -49,8 +61,7 @@ export function validateRun(value: unknown): asserts value is Run {
       if (!object(cal) || !object(cal.table) || !object(cal.labelsBySource) || !object(aspect.bandsByContextMode[mode])) throw new Error("Invalid calibration in run.json");
       for (const band of ["0..0.05", "0.05..0.15", "0.15..0.30", ">=0.30"]) {
         const row = cal.table[band];
-        if (!object(row) || !probability(row.pValid) || !probability(row.pHigh)
-          || ![row.valid, row.invalid, row.prioritized, row.high].every(count)
+        if (!object(row) || !validCalibrationRow(row)
           || !count((aspect.bandsByContextMode[mode] as Record<string, unknown>)[band])) throw new Error("Invalid calibration band in run.json");
       }
     }

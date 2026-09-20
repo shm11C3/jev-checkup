@@ -307,3 +307,36 @@ test("aborts a request waiting in the limiter queue", async t => {
   assert.equal(result.usage.requests, 1);
   assert.deepEqual(result.observations.map(observation => observation.reason), ["aborted", "aborted"]);
 });
+
+test("classifies only unambiguous input limits as unjudgeable", async t => {
+  const cases: [string, number, Record<string, unknown>, string][] = [
+    ["generic invalid input", 400, { message: "invalid input" }, "request_failed"],
+    ["invalid token", 422, { error: { message: "token invalid" } }, "request_failed"],
+    ["invalid token limit parameter", 422, { message: "invalid token limit parameter" }, "request_failed"],
+    ["invalid context", 422, { detail: "invalid context" }, "request_failed"],
+    ["invalid maximum context length setting", 422, { detail: "invalid maximum context length setting" }, "request_failed"],
+    ["payload schema", 400, { error: "payload schema invalid" }, "request_failed"],
+    ["413 status", 413, { message: "request rejected" }, "input_limit"],
+    ["explicit size code", 400, { error: { code: "input_too_large" } }, "input_limit"],
+    ["explicit size phrase", 422, { detail: "maximum context length exceeded" }, "input_limit"],
+  ];
+  for (const [label, status, body, reason] of cases) {
+    await t.test(label, async subtest => {
+      const stateDir = await mkdtemp(join(tmpdir(), "jev-observe-input-limit-"));
+      subtest.after(() => rm(stateDir, { recursive: true, force: true }));
+      const plan = await createPlan([target({ source: label })], definition, stateDir);
+      let calls = 0;
+      const client: JudgeClient = { systemOne: async () => {
+        calls++;
+        throw requestError(status, { body });
+      } };
+
+      const result = await observe(plan, definition, fastObserveOptions(stateDir, client));
+      assert.equal(calls, 1);
+      assert.equal(result.usage.requests, 1);
+      assert.equal(result.observations[0]?.outcome, reason === "input_limit" ? "unjudgeable" : "unevaluated");
+      assert.equal(result.observations[0]?.reason, reason);
+      assert.ok(!JSON.stringify(result).includes("invalid input"));
+    });
+  }
+});

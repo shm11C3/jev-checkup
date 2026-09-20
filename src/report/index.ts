@@ -42,6 +42,7 @@ function compatibleHistory(run: Run, history: Run[], aspect: RunAspect): Run[] {
 export function renderReport(run: Run, format: "terminal" | "markdown" = "terminal", history: Run[] = []): string {
   const markdown = format === "markdown";
   const esc = markdown ? md : text;
+  const lineBreak = markdown ? "  " : "";
   const lines = [markdown ? "# Codebase Health" : "Codebase Health", "",
     `Score: ${score(run.total.score)} · ${run.total.aspects} scored aspect(s) · ${run.run.complete ? "complete" : "INCOMPLETE"}`,
     `Weights: ${esc(JSON.stringify(run.total.weights))}`,
@@ -75,8 +76,14 @@ export function renderReport(run: Run, format: "terminal" | "markdown" = "termin
       if (!target) throw new Error("Finding is missing its target manifest");
       lines.push(`- ${f.rank}. ${esc(target.location.file)}:${target.location.startLine} ${esc(target.target.name)}`);
       lines.push(`  ${esc(f.status)}; suspicion ${f.evidence.suspicion.toFixed(3)}; band ${esc(f.evidence.band)}; P(valid) ${score(f.evidence.pValid)}; ${esc(f.label?.resolution ?? "unreviewed")}`);
+      const snapshot = run.snapshots[f.evidence.inputHash];
+      if (!snapshot || hash(snapshot.state) !== f.evidence.inputHash) throw new Error("Cannot create report: evaluated snapshot is missing or its hash does not match");
       for (const [key, answer] of Object.entries(f.evidence.answers)) {
-        if (typeof answer.noul === "number" && answer.noul >= 0.5 && !key.includes("ctl_") && !key.includes("hinges_on_")) lines.push(`  Evidence: ${esc(key.split("__").at(-1))} = ${answer.noul.toFixed(3)}`);
+        const question = snapshot.questions[key];
+        if (!question) throw new Error("Cannot create report: observed answer is missing its saved question");
+        lines.push("", `  Evidence (${esc(question.type)}): ${esc(typeof question.instructions === "string" ? question.instructions : JSON.stringify(question.instructions))}${lineBreak}`);
+        if (question.criteria !== undefined) lines.push(`  Criteria: ${esc(JSON.stringify(question.criteria))}${lineBreak}`);
+        lines.push(`  Answer: ${esc(JSON.stringify(answer))}`);
       }
     }
     for (const f of aspectFindings.filter(deferred)) {

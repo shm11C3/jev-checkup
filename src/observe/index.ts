@@ -158,16 +158,56 @@ function errorHints(error: unknown): string {
   if (!isRecord(error)) return "";
   const fields: unknown[] = [error.name, error.code, error.type, error.message];
   if (isRecord(error.body)) {
-    fields.push(error.body.name, error.body.code, error.body.type, error.body.message, error.body.error);
+    fields.push(error.body.name, error.body.code, error.body.type, error.body.message, error.body.error, error.body.detail);
+    if (isRecord(error.body.error)) {
+      fields.push(error.body.error.name, error.body.error.code, error.body.error.type, error.body.error.message);
+    }
+    if (isRecord(error.body.detail)) {
+      fields.push(error.body.detail.name, error.body.detail.code, error.body.detail.type, error.body.detail.message);
+    }
   }
   return fields.filter((value): value is string => typeof value === "string").join(" ").toLowerCase();
+}
+
+function errorCodes(error: unknown): string[] {
+  const codes: string[] = [];
+  const seen = new Set<Record<string, unknown>>();
+  function visit(value: unknown, depth: number): void {
+    if (!isRecord(value) || depth > 3 || seen.has(value)) return;
+    seen.add(value);
+    for (const key of ["code", "type", "name"]) {
+      if (typeof value[key] === "string") codes.push(value[key]);
+    }
+    for (const key of ["body", "error", "detail"]) visit(value[key], depth + 1);
+  }
+  visit(error, 0);
+  return codes;
+}
+
+function normalizedErrorText(value: string): string {
+  return value.toLowerCase().replace(/[_.-]+/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function isInputLimitCode(value: string): boolean {
+  const code = normalizedErrorText(value).replace(/ /g, "_");
+  return /^(?:[a-z]+_)*(?:input|request|payload|body|context|prompt|token|tokens|string|value)_(?:too_large|too_long|too_big|size_exceeded|length_exceeded|window_exceeded|limit_exceeded)$/.test(code);
+}
+
+function hasInputLimitPhrase(value: string): boolean {
+  const text = normalizedErrorText(value);
+  if (/\btoo many tokens\b/i.test(text)) return true;
+  const subject = String.raw`(?:input|request|payload|body|context|prompt|token(?:s)?)`;
+  const oversize = String.raw`(?:too large|too long|too big)`;
+  const exceeded = String.raw`(?:(?:size|length|window|limit) exceeded|exceed(?:s|ed)?(?:.{0,20}(?:size|length|window|limit|maximum)))`;
+  return new RegExp(`\\b${subject}\\b.{0,40}\\b(?:${oversize}|${exceeded})\\b`, "i").test(text);
 }
 
 function isInputLimitError(error: unknown): boolean {
   const status = errorStatus(error);
   if (status === 413) return true;
   if (status !== 400 && status !== 422) return false;
-  return /input|token|context|length|too large|payload/.test(errorHints(error) || errorMessage(error));
+  if (errorCodes(error).some(isInputLimitCode)) return true;
+  return hasInputLimitPhrase(errorHints(error) || errorMessage(error));
 }
 
 function questionAnswers(

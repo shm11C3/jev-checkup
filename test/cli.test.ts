@@ -120,6 +120,29 @@ test("API failure writes incomplete observations without leaking credentials or 
   assert.ok(!io.out.includes("test-secret"));
 });
 
+test("invalid requests remain incomplete while confirmed input limits are complete exclusions", async t => {
+  for (const status of [400, 413]) {
+    await t.test(`HTTP ${status}`, async subtest => {
+      const cwd = await repository(subtest);
+      const io = output();
+      let calls = 0;
+      const client: JudgeClient = { async systemOne() {
+        calls++;
+        throw Object.assign(new Error("invalid input: private request body"), { status });
+      } };
+      const complete = status === 413;
+      assert.equal(await runCli(["scan"], { cwd, apiKey: null, client, ...io }), complete ? 0 : 1, io.err);
+      const run = await readRun(join(cwd, ".jev-checkup/run.json"));
+      assert.equal(calls, 1);
+      assert.equal(run.run.complete, complete);
+      assert.equal(run.targets[0]!.outcome, complete ? "unjudgeable" : "unevaluated");
+      assert.equal(run.targets[0]!.reason, complete ? "input_limit" : "request_failed");
+      assert.ok(!JSON.stringify(run).includes("private request body"));
+      assert.ok(!io.out.includes("private request body"));
+    });
+  }
+});
+
 test("unsupported budget option fails before any request or output write", async t => {
   const cwd = await repository(t);
   const io = output();

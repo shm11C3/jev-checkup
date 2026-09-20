@@ -59,6 +59,53 @@ test("saved calibration counts must be valid before a report can display them", 
   assert.throws(() => validateRun(run), /Invalid calibration band/);
 });
 
+test("report presents saved questions, criteria and all answer types as evidence", () => {
+  const run = fixture();
+  const finding = run.findings[0]!;
+  const questions = run.snapshots[finding.evidence.inputHash]!.questions;
+  questions.assertion_specificity = {
+    type: "score", instructions: { question: "How specific are the assertions?", focus: "Judge the strongest assertion." },
+    criteria: ["Exact expected value", "Partial shape", "Existence only"],
+  };
+  questions.verdict = { type: "choice", instructions: "Does the assertion verify the title?", criteria: { verifies: "Would fail if broken", misses: "Would still pass" } };
+  finding.evidence.answers = {
+    outcome_unasserted: { type: "noul", noul: 0.4 },
+    assertion_specificity: { type: "score", score: 1.8, confidence: 0.85, probabilities: { "0": 0.05, "1": 0.1, "2": 0.85 }, legend: { "0": "Exact expected value", "1": "Partial shape", "2": "Existence only" } },
+    verdict: { type: "choice", choice: "misses", confidence: 0.9, probabilities: { verifies: 0.1, misses: 0.9 } },
+  };
+  for (const format of ["terminal", "markdown"] as const) {
+    const report = renderReport(run, format);
+    assert.match(report, /Does this test omit the outcome assertion\?/);
+    assert.match(report, /"noul":0\.4/);
+    assert.match(report, /How specific are the assertions\?/);
+    assert.match(report, /Judge the strongest assertion\./);
+    assert.match(report, /"score":1\.8/);
+    assert.match(report, /"legend":/);
+    assert.match(report, /Existence only/);
+    assert.match(report, /Does the assertion verify the title\?/);
+    assert.match(report, /Would still pass/);
+    assert.match(report, /"choice":"misses"/);
+    assert.match(report, /"probabilities":/);
+    assert.match(report, /"confidence":0\.9/);
+  }
+});
+
+test("report escapes saved evidence and refuses missing evidence provenance", () => {
+  const run = fixture();
+  const snapshot = run.snapshots[run.findings[0]!.evidence.inputHash]!;
+  snapshot.questions.outcome_unasserted!.instructions = "<script>\u001b[31m[link](bad)";
+  const markdown = renderReport(run, "markdown");
+  assert.ok(!markdown.includes("<script>"));
+  assert.ok(!markdown.includes("\u001b"));
+  assert.ok(markdown.includes("\\[link\\]"));
+  delete snapshot.questions.outcome_unasserted;
+  assert.throws(() => renderReport(run), /missing its saved question/);
+  snapshot.state = "altered";
+  assert.throws(() => renderReport(run), /hash does not match/);
+  delete run.snapshots[run.findings[0]!.evidence.inputHash];
+  assert.throws(() => renderReport(run), /snapshot is missing/);
+});
+
 test("compatible history is re-scored with current calibration, not historic score", () => {
   const run = fixture();
   const past = structuredClone(run);
@@ -66,7 +113,7 @@ test("compatible history is re-scored with current calibration, not historic sco
   const current = run.aspects[0]!;
   current.calibration.byContextMode.focus.source = "local";
   current.calibration.byContextMode.focus.table["0.15..0.30"].pValid = 0.75;
-  Object.assign(current.calibration.byContextMode.focus.table["0.15..0.30"], { valid: 3, invalid: 1, prioritized: 2, high: 1 });
+  Object.assign(current.calibration.byContextMode.focus.table["0.15..0.30"], { valid: 3, invalid: 1, prioritized: 2, high: 1, pHigh: 0.5 });
   const report = renderReport(run, "terminal", [past]);
   assert.match(report, /score 0\.250/);
   assert.match(report, /validity labels 4 \(valid 3, invalid 1\); prioritized valid labels 2 \(high 1\)/);
