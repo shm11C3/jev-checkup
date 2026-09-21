@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { parseDocument } from "yaml";
-import type { Config, Thresholds } from "../types.js";
+import type { AspectId, Config, Thresholds } from "../types.js";
 
 export const DEFAULT_CONFIG: Config = {
   model: "jev-1.13.0",
@@ -46,7 +46,8 @@ export function parseConfig(value: unknown): Config {
   }
   if (value.aspects !== undefined) {
     const aspects = stringList(value.aspects, "aspects");
-    if (aspects.length !== 1 || aspects[0] !== "test-honesty") throw new Error("This version supports only the test-honesty aspect");
+    if (aspects.length === 0 || aspects.some(aspect => !["test-honesty", "naming-honesty"].includes(aspect))) throw new Error("Configuration aspects must contain supported aspects: test-honesty or naming-honesty");
+    config.aspects = aspects as AspectId[];
   }
   if (value.thresholds !== undefined) {
     if (!object(value.thresholds)) throw new Error("Configuration thresholds must be an object");

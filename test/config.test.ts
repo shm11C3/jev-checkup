@@ -8,7 +8,7 @@ import { loadConfig, parseConfig } from "../src/config/index.js";
 test("configuration rejects moving aliases, cost caps and unsupported aspects", () => {
   assert.throws(() => parseConfig({ model: "jev-latest" }), /pinned/);
   assert.throws(() => parseConfig({ maxCost: 1 }), /unsupported/);
-  assert.throws(() => parseConfig({ aspects: ["test-honesty", "naming-honesty"] }), /only/);
+  assert.throws(() => parseConfig({ aspects: ["unused"] }), /supported/);
   assert.throws(() => parseConfig({ thresholds: { midLow: 0.8, midHigh: 0.2 } }), /midLow/);
   assert.throws(() => parseConfig({ concurrency: 0 }), /positive/);
   assert.throws(() => parseConfig({ concurrency: Infinity }), /positive/);
@@ -32,4 +32,11 @@ test("YAML failures do not echo sensitive configuration values", async t => {
   await assert.rejects(loadConfig(dir), error => error instanceof Error && !error.message.includes("super-secret"));
   await writeFile(join(dir, ".jev-checkup.yml"), "concurrency: 1\nconcurrency: 2\n");
   await assert.rejects(loadConfig(dir), /Invalid configuration/);
+});
+
+test("naming and combined scans are explicit configuration choices", () => {
+  assert.equal(parseConfig({}).aspects, undefined);
+  assert.deepEqual(parseConfig({ aspects: ["naming-honesty"] }).aspects, ["naming-honesty"]);
+  assert.deepEqual(parseConfig({ aspects: ["test-honesty", "naming-honesty"] }).aspects, ["test-honesty", "naming-honesty"]);
+  assert.throws(() => parseConfig({ aspects: [] }), /aspect/);
 });

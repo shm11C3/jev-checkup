@@ -65,6 +65,11 @@ export function validateRun(value: unknown): asserts value is Run {
     if (!object(aspect) || !nonempty(aspect.id) || !nonempty(aspect.condition) || !object(aspect.definition)
       || !object(aspect.calibration) || !object(aspect.calibration.byContextMode) || !object(aspect.bandsByContextMode) || !object(aspect.comparison)
       || !Number.isSafeInteger(aspect.evaluated) || Number(aspect.evaluated) < 0) throw new Error("Invalid aspect in run.json");
+    if (aspect.selectionFiles !== undefined && (!Array.isArray(aspect.selectionFiles)
+      || aspect.selectionFiles.some(file => !object(file) || !relativePath(file.file)
+        || !["parsed", "skipped", "error"].includes(String(file.status))
+        || (file.reason !== undefined && typeof file.reason !== "string")
+        || (file.hash !== undefined && !nonempty(file.hash))))) throw new Error("Invalid aspect selection in run.json");
     for (const mode of ["focus", "focusprod"]) {
       const cal = aspect.calibration.byContextMode[mode];
       if (!object(cal) || !object(cal.table) || !object(cal.labelsBySource) || !object(aspect.bandsByContextMode[mode])) throw new Error("Invalid calibration in run.json");

@@ -1,20 +1,21 @@
 #!/usr/bin/env node
+import type { Plan, Run } from "../types.js";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolve, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs, stripVTControlCharacters } from "node:util";
 import { loadConfig } from "../config/index.js";
-import { getTestAspectDefinition } from "../aspects/index.js";
+import { getAspectDefinitions } from "../aspects/index.js";
 import { selectTargets } from "../select/index.js";
 import { createPlan } from "../plan/index.js";
 import { observe, type JudgeClient } from "../observe/index.js";
-import { deriveRun } from "../derive/index.js";
+import { deriveRun, mergeAspectRuns } from "../derive/index.js";
 import { renderBrief, renderReport } from "../report/index.js";
 import { readHistory, readLabels, readRun, writeRun } from "./storage.js";
 import { VERSION } from "../shared/version.js";
 
-const HELP = `jev-checkup — provisional test-honesty observations
+const HELP = `jev-checkup — provisional codebase health observations
 
 Source code is sent to TypeSafe AI during scan. run.json and briefs contain code.
 Run from your repository (or a subdirectory); paths select the scan scope.
@@ -27,7 +28,8 @@ Run from your repository (or a subdirectory); paths select the scan scope.
 scan reads .jev-checkup.yml at the repository root when present.
 Credentials: TYPESAFE_API_KEY environment variable only.
 Dry-run, report and brief never call Jev. Cached scans need no API key.
-Cost limits, naming/static aspects and GitHub publication are not part of phase 1.
+Naming is opt-in via configuration aspects.
+Cost limits and static aspects are not supported.
 `;
 
 export interface CliEnvironment {
@@ -88,43 +90,56 @@ export async function runCli(args: string[], env: CliEnvironment = {}): Promise<
     }
     const root = git(cwd, ["rev-parse", "--show-toplevel"]) ?? cwd;
     const config = await loadConfig(root, values.config ? resolve(cwd, values.config) : undefined);
-    const definition = getTestAspectDefinition(config);
+    const definitions = getAspectDefinitions(config);
     const paths = (positionals.length > 1 ? positionals.slice(1) : ["."]).map(p => relative(root, resolve(cwd, p)).replaceAll("\\", "/") || ".");
     const stateDir = values["state-dir"] ? resolve(cwd, values["state-dir"]) : resolve(root, ".jev-checkup");
     const historyDir = values.history ? resolve(cwd, values.history) : undefined;
     // Validate requested local input before making any network request.
     const labels = await readLabels(values.labels ? resolve(cwd, values.labels) : resolve(stateDir, "labels.jsonl"), !values.labels);
     const history = await readHistory(historyDir);
-    const selection = await selectTargets(root, paths, config, definition);
-    const plan = await createPlan(selection.targets, definition, stateDir);
+    const prepared = await Promise.all(definitions.map(async definition => {
+      const selection = await selectTargets(root, paths, config, definition);
+      const plan = await createPlan(selection.targets, definition, stateDir);
+      return { definition, selection, plan };
+    }));
+    const plan: Plan = { items: prepared.flatMap(p => p.plan.items), requests: 0, cacheHits: 0, unjudgeable: 0 };
+    for (const part of prepared) {
+      plan.requests += part.plan.requests;
+      plan.cacheHits += part.plan.cacheHits;
+      plan.unjudgeable += part.plan.unjudgeable;
+    }
+    const selection = prepared[0]!.selection;
     if (values["dry-run"]) {
       stdout(`${JSON.stringify({
-        dryRun: true, model: definition.model,
+        dryRun: true, model: config.model, aspects: definitions.map(d => d.id),
         repositoryId: selection.scope.repositoryId, scope: selection.scope,
-        targetCount: selection.targets.length, requests: plan.requests, cacheHits: plan.cacheHits, unjudgeable: plan.unjudgeable,
+        aspectScopes: prepared.map(p => ({ aspect: p.definition.id, scope: p.selection.scope })),
+        targetCount: plan.items.length, requests: plan.requests, cacheHits: plan.cacheHits, unjudgeable: plan.unjudgeable,
         targets: plan.items.map(item => ({
-          file: item.target.location.file, title: item.target.target.name,
+          aspect: item.target.aspect, file: item.target.location.file, title: item.target.target.name,
           contextMode: item.target.contextMode, contextReason: item.target.contextReason,
           sourceFiles: item.target.evidenceSources.map(s => s.file),
           missingQuestions: Object.keys(item.missingQuestions).length,
           blockedReason: item.blockedReason,
         })),
-        errors: selection.errors,
+        errors: prepared.flatMap(p => p.selection.errors),
       }, null, 2)}\n`);
-      return selection.errors.length || !selection.scope.enumerationComplete ? 1 : 0;
+      return prepared.some(p => p.selection.errors.length || !p.selection.scope.enumerationComplete) ? 1 : 0;
     }
-    const observed = await observe(plan, definition, {
+    const observed = await observe(plan, definitions[0]!, {
       stateDir, apiKey, concurrency: config.concurrency,
       requestsPerMinute: config.requestsPerMinute, tokensPerSecond: config.tokensPerSecond,
       signal: env.signal, client: env.client,
     });
-    const run = deriveRun({
-      selection, definition, observations: observed.observations, usage: observed.usage,
-      labels, history, top: config.top,
-      metadata: { id: randomUUID(), at: (env.now?.() ?? new Date()).toISOString(),
-        commit: git(root, ["rev-parse", "HEAD"]), dirty: Boolean(git(root, ["status", "--porcelain"])),
-        complete: selection.scope.enumerationComplete && selection.errors.length === 0 && !env.signal?.aborted },
+    const metadata: Run["run"] = { id: randomUUID(), at: (env.now?.() ?? new Date()).toISOString(),
+      commit: git(root, ["rev-parse", "HEAD"]), dirty: Boolean(git(root, ["status", "--porcelain"])), complete: !env.signal?.aborted };
+    const runs = prepared.map(({ definition, selection }) => {
+      const fingerprints = new Set(selection.targets.map(target => target.fingerprint));
+      return deriveRun({ selection, definition, observations: observed.observations.filter(o => fingerprints.has(o.fingerprint)),
+        usage: { requests: 0, inputTokens: 0, cacheHits: 0 }, labels, history, top: config.top, metadata });
     });
+    const run = mergeAspectRuns(runs);
+    run.usage = { ...observed.usage };
     const output = values.out ? resolve(cwd, values.out) : resolve(stateDir, "run.json");
     const historyPath = historyDir ? resolve(historyDir, `${run.run.id}.json`) : undefined;
     await writeRun(output, run, output === historyPath);

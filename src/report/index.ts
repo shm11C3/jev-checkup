@@ -116,7 +116,7 @@ export function renderReport(run: Run, format: "terminal" | "markdown" = "termin
     for (const control of Object.values(t.controls ?? {})) control === "available" ? controlsAvailable++ : controlsMissing++;
     for (const reason of new Set([t.contextReason, t.reason].filter(Boolean))) reasons.set(reason!, (reasons.get(reason!) ?? 0) + 1);
   }
-  lines.push(`- Context: with production ${modes.focusprod}; test-only ${modes.focus}; controls available ${controlsAvailable}, missing ${controlsMissing}`);
+  lines.push(`- Context: with production ${modes.focusprod}; local context ${modes.focus}; controls available ${controlsAvailable}, missing ${controlsMissing}`);
   for (const [reason, n] of reasons) lines.push(`- ${esc(reason)}: ${n}`);
   lines.push(`- Skipped files: ${run.unmeasured.skippedFiles}; scan/parse failures: ${run.scope.files.filter(f => f.status === "error").length}`);
   for (const error of run.unmeasured.selectionErrors ?? []) lines.push(`- Selection error: ${esc(error)}`);

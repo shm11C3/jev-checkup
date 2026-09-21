@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "jev-checkup phase-1 configuration",
+  "title": "jev-checkup configuration",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -12,7 +12,7 @@
     "requestsPerMinute": { "type": "integer", "minimum": 1 },
     "tokensPerSecond": { "type": "integer", "minimum": 1 },
     "top": { "type": "integer", "minimum": 1 },
-    "aspects": { "const": ["test-honesty"] },
+    "aspects": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["test-honesty", "naming-honesty"] } },
     "thresholds": {
       "type": "object", "additionalProperties": false,
       "properties": {

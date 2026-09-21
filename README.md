@@ -2,7 +2,7 @@
 
 **A scan sends selected source code to TypeSafe AI. `run.json` and review briefs contain source code; keep them within the same access boundary as your repository.** `--dry-run` shows the planned scope without sending code. `report` and `brief` work offline from saved results.
 
-This is a phase-1 implementation of a codebase health dashboard. It checks whether JavaScript/TypeScript tests verify the behaviour their titles claim. Small Jev judgements are composed in code, with explicit outcomes for insufficient context and unmeasured targets. Findings are review candidates, not a quality gate or verified bugs.
+This codebase health dashboard checks whether JavaScript/TypeScript tests verify the behaviour their titles claim, with opt-in checks for function and method naming. Small Jev judgements are composed in code, with explicit outcomes for insufficient context and unmeasured targets. Findings are review candidates, not a quality gate or verified bugs.
 
 The initial question set has only a small, agent-labelled preliminary evaluation. Population Precision@N, calibrated ranking quality and dashboard noise thresholds have not been independently validated. Scores are unavailable until matching local calibration labels exist; no calibration priors are fabricated.
 
@@ -16,7 +16,7 @@ npm run check
 node dist/cli/index.js --help
 ```
 
-The current CLI includes the **test-honesty** aspect, cache and partial-run handling, revision-bound labels, compatible history, terminal/Markdown reports, and self-contained briefs. Naming, unused/duplicate adapters, GitHub issue publication and the composite Action are phase 2. Package publication is not part of this implementation.
+The current CLI includes the **test-honesty** aspect, cache and partial-run handling, revision-bound labels, compatible history, terminal/Markdown reports, and self-contained briefs. It also supports opt-in function/method naming checks and combined aspect scans. Variable/module naming and unused/duplicate adapters remain pending. Package publication is not part of this implementation.
 
 ## Use
 
@@ -37,6 +37,20 @@ Until installed, replace `jev-checkup` with `node /absolute/path/to/jev-checkup/
 A scan writes `.jev-checkup/run.json` by default. `--state-dir` changes the cache and default output location; `--out` changes the run output. A supplied `--history` directory is both read for comparison and appended with an immutable, run-ID-named JSON file. History is never fetched automatically from a remote branch.
 
 Exit codes: **0** for successful processing (including findings), **1** for an incomplete scan, **2** for invalid input/configuration or a command failure. An incomplete run records which targets could not be evaluated. It does not become a history baseline. Finding-free scans with unmeasured targets must not be interpreted as proof of health.
+
+## Naming and combined scans
+
+The naming aspect checks whether named functions and methods describe their visible behavior. It is provisional and has no independently validated calibration corpus. Anonymous callbacks, accessors, dynamic names and declarations without bodies are outside this increment; visible selection limitations remain in the run. Function context does not include arbitrary dependency implementations, so insufficient context stays `cannot_tell`.
+
+Enable it explicitly in `.jev-checkup.yml`:
+
+```yaml
+aspects: [test-honesty, naming-honesty]
+```
+
+Omitting `aspects` preserves the original test-only scan. Use `[naming-honesty]` for naming alone. The same request/token limiter covers all aspects, while labels, calibration and compatible history remain separate. The total averages only calibrated aspect scores; it stays unavailable if none are calibrated. Existing `thresholds` overrides affect test honesty only; naming uses its own provisional fixed definition.
+
+See [the naming contracts](docs/phase-two-naming.md) for the scope and verification boundaries.
 
 ## Configuration
 
