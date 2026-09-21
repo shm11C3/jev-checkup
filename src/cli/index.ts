@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import type { Plan, Run } from "../types.js";
+import { appendFile } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolve, relative } from "node:path";
@@ -12,6 +13,7 @@ import { createPlan } from "../plan/index.js";
 import { observe, type JudgeClient } from "../observe/index.js";
 import { deriveRun, mergeAspectRuns } from "../derive/index.js";
 import { renderBrief, renderReport } from "../report/index.js";
+import { renderGithubReport, publishGithubReport } from "../report/github.js";
 import { readHistory, readLabels, readRun, writeRun } from "./storage.js";
 import { VERSION } from "../shared/version.js";
 
@@ -22,13 +24,13 @@ Run from your repository (or a subdirectory); paths select the scan scope.
 
   jev-checkup scan [paths...] [--config file] [--dry-run]
       [--state-dir dir] [--out run.json] [--history dir] [--labels labels.jsonl]
-  jev-checkup report run.json [--format terminal|markdown] [--history dir]
+  jev-checkup report run.json [--format terminal|markdown|github] [--issue new|N] [--repo owner/name] [--history dir]
   jev-checkup brief run.json [--top N]
 
 scan reads .jev-checkup.yml at the repository root when present.
-Credentials: TYPESAFE_API_KEY environment variable only.
+Credentials: TYPESAFE_API_KEY for scans; GITHUB_TOKEN for issue publication.
 Dry-run, report and brief never call Jev. Cached scans need no API key.
-Naming is opt-in via configuration aspects.
+Naming is opt-in via configuration aspects. GitHub issue publication requires --issue.
 Cost limits and static aspects are not supported.
 `;
 
@@ -40,6 +42,10 @@ export interface CliEnvironment {
   signal?: AbortSignal;
   client?: JudgeClient;
   now?: () => Date;
+  githubToken?: string | null;
+  githubRepository?: string;
+  summaryPath?: string | null;
+  fetch?: typeof globalThis.fetch;
 }
 
 function git(root: string, args: string[]): string | null {
@@ -52,6 +58,7 @@ export async function runCli(args: string[], env: CliEnvironment = {}): Promise<
   const stderr = env.stderr ?? (value => process.stderr.write(value));
   const cwd = resolve(env.cwd ?? process.cwd());
   const apiKey = env.apiKey === null ? undefined : env.apiKey ?? process.env.TYPESAFE_API_KEY;
+  const githubToken = env.githubToken === null ? undefined : env.githubToken ?? process.env.GITHUB_TOKEN;
   try {
     const { values, positionals } = parseArgs({ args, allowPositionals: true, strict: true, options: {
       help: { type: "boolean", short: "h" },
@@ -64,13 +71,15 @@ export async function runCli(args: string[], env: CliEnvironment = {}): Promise<
       labels: { type: "string" },
       format: { type: "string" },
       top: { type: "string" },
+      issue: { type: "string" },
+      repo: { type: "string" },
     } });
     if (values.help || args.length === 0) { stdout(HELP); return 0; }
     if (values.version) { stdout(`${VERSION}\n`); return 0; }
     const command = positionals[0];
     const allowed: Record<string, string[]> = {
       scan: ["dry-run", "config", "state-dir", "out", "history", "labels"],
-      report: ["format", "history"], brief: ["top"],
+      report: ["format", "history", "issue", "repo"], brief: ["top"],
     };
     if (!command || !allowed[command]) throw new Error("Expected scan, report or brief; use --help");
     if (Object.keys(values).some(k => !allowed[command]!.includes(k))) throw new Error(`Unsupported option for ${command}`);
@@ -82,9 +91,23 @@ export async function runCli(args: string[], env: CliEnvironment = {}): Promise<
         stdout(renderBrief(run, top));
       } else {
         const format = values.format ?? "terminal";
-        if (format !== "terminal" && format !== "markdown") throw new Error("Report format must be terminal or markdown; GitHub publication is not supported in phase 1");
+        if (!["terminal", "markdown", "github"].includes(format)) throw new Error("Report format must be terminal, markdown or github");
+        if (format !== "github" && (values.issue || values.repo)) throw new Error("Issue publication requires --format github");
         const history = await readHistory(values.history ? resolve(cwd, values.history) : undefined);
-        stdout(renderReport(run, format, history));
+        if (format === "github") {
+          const issue = values.issue === "new" ? "new" : values.issue === undefined ? undefined : Number(values.issue);
+          if (issue !== undefined && issue !== "new" && (!Number.isSafeInteger(issue) || issue < 1)) throw new Error("Issue must be new or a positive integer");
+          const body = renderGithubReport(run, history);
+          const summary = env.summaryPath === null ? undefined : env.summaryPath ?? process.env.GITHUB_STEP_SUMMARY;
+          if (summary) await appendFile(summary, body, "utf8");
+          stdout(body);
+          if (issue !== undefined) {
+            if (!githubToken) throw new Error("GITHUB_TOKEN is required for issue publication");
+            const result = await publishGithubReport(run, { repo: values.repo ?? env.githubRepository ?? process.env.GITHUB_REPOSITORY ?? "", issue, token: githubToken, fetch: env.fetch, history });
+            stderr(`Updated ${result.url}\n`);
+            for (const warning of result.warnings) stderr(`${warning}\n`);
+          }
+        } else stdout(renderReport(run, format as "terminal" | "markdown", history));
       }
       return 0;
     }
@@ -149,7 +172,8 @@ export async function runCli(args: string[], env: CliEnvironment = {}): Promise<
     return run.run.complete ? 0 : 1;
   } catch (error) {
     const original = error instanceof Error ? error.message : "Execution failed";
-    const redacted = apiKey ? original.replaceAll(apiKey, "[redacted]") : original;
+    let redacted = original;
+    for (const secret of [apiKey, githubToken]) if (secret) redacted = redacted.replaceAll(secret, "[redacted]");
     stderr(`jev-checkup: ${stripVTControlCharacters(redacted).replace(/[\r\n]/g, " ")}\n`);
     return 2;
   }

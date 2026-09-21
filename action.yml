@@ -1,0 +1,52 @@
+name: Codebase health dashboard
+description: Scan configured aspects, retain history, and write a source-free GitHub dashboard
+inputs:
+  paths:
+    description: Repository-relative scan paths, one per line
+    default: '.'
+  config:
+    description: Optional configuration file relative to the caller workspace
+    default: ''
+  state-dir:
+    description: Local observations and run output directory; may be cached separately
+    default: '.jev-checkup'
+  history-branch:
+    description: Dedicated durable history branch; empty disables branch persistence
+    default: 'jev-checkup-history'
+  issue:
+    description: Empty for summary only; new to create/reuse a dashboard, or its issue number
+    default: ''
+outputs:
+  run-json:
+    description: Saved run path containing source code; preserve repository access controls
+    value: ${{ steps.dashboard.outputs.run-json }}
+runs:
+  using: composite
+  steps:
+    - name: Skip pull requests
+      if: ${{ startsWith(github.event_name, 'pull_request') }}
+      shell: bash
+      run: printf '%s\n' 'Skipped dashboard scan for pull request event.' >> "$GITHUB_STEP_SUMMARY"
+    - name: Set up Node
+      if: ${{ !startsWith(github.event_name, 'pull_request') }}
+      uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      with:
+        node-version: '22'
+        package-manager-cache: false
+    - name: Build CLI
+      if: ${{ !startsWith(github.event_name, 'pull_request') }}
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: npm ci && npm run build
+    - name: Update dashboard
+      id: dashboard
+      if: ${{ !startsWith(github.event_name, 'pull_request') }}
+      shell: bash
+      env:
+        JEV_ACTION_PATH: ${{ github.action_path }}
+        JEV_PATHS: ${{ inputs.paths }}
+        JEV_CONFIG: ${{ inputs.config }}
+        JEV_STATE_DIR: ${{ inputs.state-dir }}
+        JEV_HISTORY_BRANCH: ${{ inputs.history-branch }}
+        JEV_ISSUE: ${{ inputs.issue }}
+      run: node "$JEV_ACTION_PATH/dist/action/index.js"

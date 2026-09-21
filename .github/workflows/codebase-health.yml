@@ -1,0 +1,45 @@
+name: Codebase health dashboard
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: jev-checkup-history
+  cancel-in-progress: false
+
+jobs:
+  dashboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Check TypeSafe API key
+        shell: bash
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+        run: |
+          if [[ -z "${TYPESAFE_API_KEY:-}" ]]; then
+            echo "::error::Set the TYPESAFE_API_KEY repository secret before running this workflow."
+            exit 1
+          fi
+
+      - name: Run codebase health dashboard
+        uses: ./
+        with:
+          paths: |
+            src
+            test
+          config: .jev-checkup.yml
+          history-branch: jev-checkup-history
+          issue: new
+        env:
+          TYPESAFE_API_KEY: ${{ secrets.TYPESAFE_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
