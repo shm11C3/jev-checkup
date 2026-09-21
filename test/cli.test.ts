@@ -252,3 +252,44 @@ test("combined aspects share observation limits and remain independent in saved 
   assert.equal(reused.resolved.length, 0);
   assert.ok(reused.findings.every(f => f.status === "persisting"));
 });
+
+test("GitHub summary rendering stays offline and excludes source and literal evidence", async t => {
+  const cwd = await repository(t);
+  const client: JudgeClient = {
+    async systemOne(request) {
+      return { model: request.model, answers: answers(request.questions, true) };
+    },
+  };
+  assert.equal(await runCli(["scan"], { cwd, apiKey: null, client, ...output() }), 0);
+  const summary = join(cwd, "summary.md"),
+    io = output();
+  assert.equal(
+    await runCli(
+      ["report", ".jev-checkup/run.json", "--format", "github"],
+      {
+        cwd,
+        apiKey: null,
+        githubToken: null,
+        summaryPath: summary,
+        ...io,
+        fetch: async () => {
+          throw new Error("must not post");
+        },
+      },
+    ),
+    0,
+    io.err,
+  );
+  assert.equal(await readFile(summary, "utf8"), io.out);
+  assert.ok(!io.out.includes("toBeDefined"));
+  assert.ok(!io.out.includes("doubles the number"));
+  assert.match(io.out, /test-honesty/);
+  const invalid = output();
+  assert.equal(
+    await runCli(
+      ["report", ".jev-checkup/run.json", "--format", "markdown", "--issue", "new"],
+      { cwd, apiKey: null, ...invalid },
+    ),
+    2,
+  );
+});

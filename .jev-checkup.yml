@@ -1,0 +1,5 @@
+model: jev-1.13.0
+aspects: [test-honesty, naming-honesty]
+include:
+  - "src/**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}"
+  - "test/**/*.{js,jsx,mjs,cjs,ts,tsx,mts,cts}"

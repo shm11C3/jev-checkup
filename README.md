@@ -34,7 +34,7 @@ Until installed, replace `jev-checkup` with `node /absolute/path/to/jev-checkup/
 
 `--dry-run` reads local files and the cache but makes no API calls and writes no run, cache or history files. It lists selected targets, source files, cache use, omitted context and skipped inputs. Scans with all observations cached need no API key. There is no cost-cap option: manage usage limits externally where your provider supports them. Actual input-token usage is recorded.
 
-A scan writes `.jev-checkup/run.json` by default. `--state-dir` changes the cache and default output location; `--out` changes the run output. A supplied `--history` directory is both read for comparison and appended with an immutable, run-ID-named JSON file. History is never fetched automatically from a remote branch.
+A scan writes `.jev-checkup/run.json` by default. `--state-dir` changes the cache and default output location; `--out` changes the run output. A supplied `--history` directory is both read for comparison and appended with an immutable, run-ID-named JSON file. The CLI does not fetch remote history; the composite Action manages its dedicated history branch.
 
 Exit codes: **0** for successful processing (including findings), **1** for an incomplete scan, **2** for invalid input/configuration or a command failure. An incomplete run records which targets could not be evaluated. It does not become a history baseline. Finding-free scans with unmeasured targets must not be interpreted as proof of health.
 
@@ -95,7 +95,7 @@ Calibration uses only matching labels and the same context mode and band; missin
 
 Reports show the label counts behind each calibrated band. Small samples may yield probabilities of zero or one; a minimum sample size has not been validated. A clean scan with no calibration still has no score. The Open count excludes findings moved to `accept`, `defer` or `dismiss`, while those findings remain in raw evidence and scoring.
 
-History comparison requires the same repository, scan scope and measurement condition. A finding is resolved only by a comparable clean observation or a confirmed target removal; missing/undecidable observations and context changes remain pending. Score differences remain unmeasured until final aggregate noise has been evaluated. Reports recalculate compatible historical scores with the current run's saved calibration table.
+History comparison requires the same repository, scan scope and measurement condition. A finding is resolved only by a comparable clean observation or a confirmed target removal; missing/undecidable observations and context changes remain pending. Score differences remain unmeasured until final aggregate noise has been evaluated. Terminal/Markdown reports recalculate compatible historical scores with the current run's saved calibration table; GitHub history displays counts only.
 
 Reports retain selection errors even when no file could be enumerated. Previous-top usefulness includes verified human/execution labels saved with resolved findings; agent-only labels remain unconfirmed.
 
@@ -108,3 +108,19 @@ Inspired by the idea of syntax-selected small model judgements in [jev-lint](htt
 See [DESIGN.md](DESIGN.md), [IMPLEMENTATION.md](IMPLEMENTATION.md) and [spike/RESULTS.md](spike/RESULTS.md) for design decisions, implementation boundaries and the limits of the preliminary evaluation. Existing external-repository spike data is not included in the published package file set.
 
 MIT License.
+
+## GitHub dashboard
+
+```sh
+jev-checkup report .jev-checkup/run.json --format github
+# Set GITHUB_TOKEN in the environment before explicitly publishing:
+jev-checkup report .jev-checkup/run.json --format github --repo owner/repo --issue new
+```
+
+GitHub output writes stdout and, when present, `GITHUB_STEP_SUMMARY`. It contains aggregate metrics and file/line locations; source snippets, target names, literal questions, answers and label notes remain in the saved run. Posting requires `--issue`; an existing issue number must have the matching dashboard scope marker. Pinning is best effort. These commands do not call Jev.
+
+The scheduled workflow scans only `src` and `test`, writes a source-free summary, and updates the scoped `Jev Checkup dashboard` issue. It runs every Monday at 03:00 UTC and can also be started with `workflow_dispatch`; the workflow uses the local composite Action and keeps immutable run history on `jev-checkup-history`.
+
+One-time setup: add the repository secret `TYPESAFE_API_KEY` under **Settings → Secrets and variables → Actions**. The workflow stops with a concise error before the Action runs when this secret is missing; the key is never printed. `.jev-checkup.yml` pins `jev-1.13.0` and opts into `test-honesty` and `naming-honesty` after the naming implementation is available on the default branch.
+
+The workflow supplies `GITHUB_TOKEN` from `${{ github.token }}` for issue publication. See [`docs/actions.md`](docs/actions.md) for the reusable Action inputs, history branch requirements, and access boundaries for saved runs.
